@@ -84,6 +84,8 @@ Les variables retenues pour la NBA sont le PIE (Player Impact Estimate) et un in
 
 Le modèle est ajusté séparément sur les vétérans (hors 4 premières saisons de contrat rookie, dont le salaire est fixé par convention collective) et exclut les échantillons trop courts (moins de 15 matchs joués), affichés différemment sur le graphique mais pas cachés du classement.
 
+Détail des itérations et tests : voir [METHODOLOGY.md](METHODOLOGY.md).
+
 ### Limite connue : sous-valorisation des scoreurs purs
 
 Un biais statistiquement significatif (p<0.05, testé sur plusieurs saisons) fait apparaître les très gros scoreurs (type Jordan, Curry) comme relativement sous-évalués par le modèle par rapport aux profils plus all-around. Trois pistes de correction ont été testées (retrait du PIE, ajout d'une variable de rating d'équipe non corrélée au poste, pondération réduite) sans succès probant : le biais persiste même sans la variable qu'on suspectait, ce qui suggère qu'il s'agit d'une vraie prime du marché au volume de scoring plutôt que d'un artefact de calcul. Un avertissement à ce sujet est affiché directement dans le dashboard.
