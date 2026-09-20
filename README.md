@@ -2,7 +2,7 @@
 
 Dashboard interactif qui croise stats de jeu et salaires NBA pour repérer les joueurs sous-payés ou surpayés par rapport à leur performance. Construit avec Streamlit, architecture pensée pour accueillir d'autres sports (rugby, foot, MMA, tennis) sans réécrire le dashboard.
 
-**Démo en ligne :** https://nba-salary-performance-zjsvtgimwptkrtmwkbhxp7.streamlit.app
+**Démo en ligne :** https://sportsanalyticsdashboard.streamlit.app
 
 ## Fonctionnalités
 
