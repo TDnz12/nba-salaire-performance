@@ -80,11 +80,11 @@ if not sport.radar_axes or sport.compute_radar_scores is None:
 
 axes = sport.radar_axes
 
-# Même dict que STATS_PERIOD_OPTIONS dans Dashboard.py (dupliqué, voir docstring du module) : reste
-# cohérent avec ce que "les stats" veulent dire ailleurs dans l'app -- ordre et défaut (premier
-# élément = index=0 plus bas) à resynchroniser à la main si Dashboard.py change encore.
+# Même dict que STATS_PERIOD_OPTIONS dans Dashboard.py (dupliqué, voir docstring du module et son
+# commentaire sur le retrait du mode "regular_playoffs") : reste cohérent avec ce que "les stats"
+# veulent dire ailleurs dans l'app -- ordre et défaut (premier élément = index=0 plus bas) à
+# resynchroniser à la main si Dashboard.py change encore.
 STATS_PERIOD_OPTIONS = {
-    "Saison + Playoffs (agrégé)": "regular_playoffs",
     "Saison régulière": "regular",
     "Playoffs uniquement": "playoffs",
 }

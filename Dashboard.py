@@ -117,21 +117,28 @@ season = st.sidebar.selectbox(
 )
 is_all_seasons = season == ALL_SEASONS_LABEL
 
-# Statistiques utilisées (saison régulière / + playoffs / playoffs uniquement) : n'affecte QUE le
-# scatter plot principal et le modèle qui le nourrit (voir get_player_stats(..., period=...) dans
-# data_sources/nba.py pour le détail des 3 options, issu du diagnostic de faisabilité playoffs).
-# Volontairement limité au mode saison unique (complexité déjà présente en mode "Toutes les
-# saisons" — bascule $/%, trajectoire, badges... voir la proposition validée) : le sélecteur
-# disparaît entièrement plutôt que de rester affiché grisé/inutilisable. Défaut = "Saison +
-# Playoffs (agrégé)" (changé sur demande explicite -- l'ordre du dict ET index=0 ci-dessous
-# pilotent ensemble ce défaut, les deux doivent rester synchronisés si l'ordre change encore).
-# Même dict et même défaut dupliqués dans pages/1_Radar_de_comparaison.py (voir sa docstring) --
-# à resynchroniser à la main si cet ordre change à nouveau. Le futur classement joueurs
-# (pages/2_Classement_joueurs.py) doit repartir de ce même ordre/défaut dès sa création. Le
-# classement équipe plus bas N'EST PAS concerné : il reste volontairement figé sur "regular" en
-# dur, indépendamment de ce sélecteur (comportement voulu, ne pas transposer ce changement là-bas).
+# Statistiques utilisées (saison régulière / playoffs uniquement) : n'affecte QUE le scatter plot
+# principal et le modèle qui le nourrit (voir get_player_stats(..., period=...) dans
+# data_sources/nba.py pour le détail des 2 options). Volontairement limité au mode saison unique
+# (complexité déjà présente en mode "Toutes les saisons" — bascule $/%, trajectoire, badges...
+# voir la proposition validée) : le sélecteur disparaît entièrement plutôt que de rester affiché
+# grisé/inutilisable.
+#
+# Un 3e mode ("Saison + Playoffs (agrégé)", period="regular_playoffs") a existé un temps puis a
+# été retiré (décision explicite) : mélanger un échantillon cohérent (saison régulière, 82 matchs
+# pour tout le monde) avec un échantillon non représentatif (playoffs, biaisé par qui se qualifie
+# et jusqu'où) n'apportait pas assez de valeur pour la complexité que ça ajoutait. Le code qui le
+# calculait (_combine_regular_playoffs_stats) a été supprimé de data_sources/nba.py -- si "regular_
+# playoffs" apparaît encore quelque part (grep), c'est un oubli de ce nettoyage, pas une option
+# valide.
+#
+# Défaut = "Saison régulière" (repassée en premier/par défaut après le retrait du mode combiné,
+# qui l'avait temporairement remplacée). Même dict et même défaut dupliqués dans
+# pages/1_Radar_de_comparaison.py (voir sa docstring) -- à resynchroniser à la main si cet ordre
+# change à nouveau. Le futur classement joueurs (pages/2_Classement_joueurs.py) doit repartir de
+# ce même ordre/défaut dès sa création. Le classement équipe plus bas N'EST PAS concerné : il
+# reste volontairement figé sur "regular" en dur, indépendamment de ce sélecteur.
 STATS_PERIOD_OPTIONS = {
-    "Saison + Playoffs (agrégé)": "regular_playoffs",
     "Saison régulière": "regular",
     "Playoffs uniquement": "playoffs",
 }

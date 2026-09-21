@@ -42,6 +42,7 @@ import glob
 import logging
 import time
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -927,11 +928,6 @@ def _extract_kaggle_season(kaggle_df: pd.DataFrame, season: str, max_year_gap: i
 # Mode playoffs (get_player_stats(..., period=...)) — voir le diagnostic de faisabilité pour le
 # raisonnement complet. Résumé des décisions :
 #   - "regular" (défaut, comportement inchangé) : saison régulière seule, comme avant.
-#   - "regular_playoffs" : stats combinées en moyenne PONDÉRÉE PAR LE TOTAL DE MATCHS (pas une
-#     simple moyenne des deux moyennes) ; le modèle salaire~performance est réajusté (refit) sur
-#     cet échantillon combiné — sain statistiquement, l'échantillon de fit reste quasi identique
-#     à celui de la saison régulière seule (97% des joueurs de playoffs dépassaient déjà
-#     MIN_GAMES_FOR_FIT en saison régulière avant même d'ajouter les playoffs).
 #   - "playoffs" : stats playoffs SEULES (pas de moyenne). PAS de nouveau modèle : seulement 17%
 #     des joueurs de playoffs atteignent MIN_GAMES_FOR_FIT en playoffs seuls, et cet échantillon
 #     est biaisé vers les franchises qui vont loin en séries (pas juste "petit", structurellement
@@ -939,11 +935,20 @@ def _extract_kaggle_season(kaggle_df: pd.DataFrame, season: str, max_year_gap: i
 #     (coefficients + normalisation de poste) aux valeurs playoffs — même principe que
 #     l'application du modèle vétérans aux rookies.
 # Le salaire réel (salary_musd/salary_pct_cap) reste TOUJOURS celui de la saison régulière dans
-# les 3 cas : c'est le seul qui existe réellement, les playoffs ne sont pas rémunérés à part.
+# les 2 cas : c'est le seul qui existe réellement, les playoffs ne sont pas rémunérés à part.
+#
+# Un 3e mode a existé ("regular_playoffs" : stats combinées saison+playoffs en moyenne pondérée
+# par le total de matchs, modèle réajusté sur cet échantillon combiné) puis a été retiré (décision
+# explicite) : mélanger un échantillon cohérent (saison régulière, 82 matchs pour tout le monde)
+# avec un échantillon non représentatif (playoffs, biaisé par qui se qualifie et jusqu'où)
+# n'apportait pas assez de valeur pour la complexité ajoutée. La fonction qui le calculait
+# (_combine_regular_playoffs_stats) a été supprimée -- PLAYOFF_PERIOD_STAT_COLS ci-dessous reste
+# nécessaire, toujours utilisée par _substitute_playoffs_only_stats (mode "playoffs").
 
-# Colonnes de stats "par période" (recalculées/substituées selon `period`) — le reste d'une ligne
-# (salaire, poste, ancienneté, is_rookie_scale...) ne dépend pas de la période choisie.
-# games_played traité à part (c'est le POIDS de la pondération, pas une valeur à moyenner).
+# Colonnes de stats "par période" (substituées selon `period`) — le reste d'une ligne (salaire,
+# poste, ancienneté, is_rookie_scale...) ne dépend pas de la période choisie. games_played est
+# géré séparément (pas dans cette liste) par _substitute_playoffs_only_stats, qui l'ajoute
+# explicitement à côté.
 PLAYOFF_PERIOD_STAT_COLS = [
     "points_per_game", "rebounds_per_game", "assists_per_game", "steals_per_game",
     "blocks_per_game", "turnovers_per_game", "minutes_per_game", "fg_pct", "fg3_pct",
@@ -978,41 +983,6 @@ def _zscore_by_position(stat_source: pd.DataFrame, apply_to: pd.DataFrame, impac
     group_std = apply_to["position_group"].map(group_stats["std"])
     z = (apply_to[impact_col] - group_mean) / group_std
     return z.replace([np.inf, -np.inf], np.nan)
-
-
-def _combine_regular_playoffs_stats(regular: pd.DataFrame, playoffs: pd.DataFrame) -> pd.DataFrame:
-    """Combine les stats per-game saison régulière + playoffs en moyenne PONDÉRÉE PAR LE TOTAL DE
-    MATCHS (pas une simple moyenne des deux moyennes) : combined = (reg*gp_reg + po*gp_po) /
-    (gp_reg + gp_po). games_played du résultat = gp_reg + gp_po. Un joueur qui n'a pas fait les
-    playoffs (absent de `playoffs`) garde exactement ses stats de saison régulière (poids
-    playoffs = 0 dans la moyenne).
-
-    Approximation assumée pour les colonnes de pourcentage (fg_pct, ts_pct, usg_pct...) :
-    pondérer par NOMBRE DE MATCHS plutôt que par volume réel (tirs tentés, possessions...) reste
-    une approximation — non corrigée ici, la pondération demandée est explicitement par matchs
-    (c'est aussi la seule donnée de poids disponible à ce niveau, pas les tentatives par match).
-    """
-    weight_cols = PLAYOFF_PERIOD_STAT_COLS + ["games_played"]
-    reg = regular[["player_id"] + weight_cols].rename(columns={c: f"{c}_reg" for c in weight_cols})
-    po = playoffs[["player_id"] + weight_cols].rename(columns={c: f"{c}_po" for c in weight_cols})
-    combined_weights = reg.merge(po, on="player_id", how="left")
-
-    gp_reg = combined_weights["games_played_reg"].fillna(0)
-    gp_po = combined_weights["games_played_po"].fillna(0)
-    gp_total = gp_reg + gp_po
-
-    result = regular.copy()
-    result["games_played"] = gp_total.to_numpy()
-    for col in PLAYOFF_PERIOD_STAT_COLS:
-        reg_val = combined_weights[f"{col}_reg"].fillna(0)
-        po_val = combined_weights[f"{col}_po"].fillna(0)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            combined = (reg_val * gp_reg + po_val * gp_po) / gp_total.replace(0, np.nan)
-        # gp_total == 0 : cas défensif seulement (un joueur présent dans `regular` a par
-        # construction au moins joué en saison régulière) -- retombe sur sa valeur régulière brute
-        # plutôt que sur NaN issu d'une division 0/0.
-        result[col] = combined.where(gp_total > 0, combined_weights[f"{col}_reg"]).to_numpy()
-    return result
 
 
 def _substitute_playoffs_only_stats(regular_enriched: pd.DataFrame, playoffs: pd.DataFrame) -> pd.DataFrame:
@@ -1086,6 +1056,12 @@ def _enrich_stats(stats: pd.DataFrame, season: str, force_refresh: bool) -> tupl
 # --------------------------------------------------------------------------
 # Point d'entrée public
 # --------------------------------------------------------------------------
+# Type de `period` ci-dessous -- déclaré explicitement (n'existait pas avant, la seule occurrence
+# était une annotation sur get_player_stats jamais définie ; resté sans erreur jusqu'ici
+# uniquement grâce à `from __future__ import annotations`, qui traite les annotations comme de
+# simples chaînes jamais évaluées au runtime). Deux valeurs seulement depuis le retrait de
+# "regular_playoffs".
+PlayoffMode = Literal["regular", "playoffs"]
 def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMode = "regular") -> pd.DataFrame:
     """Retourne les stats joueurs NBA pour une saison, normalisées et
     enrichies (salaire, PER, indicateurs de valeur), avec mise en cache
@@ -1094,21 +1070,21 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
     `period` (voir le bloc de commentaires juste au-dessus de PLAYOFF_PERIOD_STAT_COLS pour le
     détail complet) :
       - "regular" (défaut) : comportement historique inchangé, saison régulière seule.
-      - "regular_playoffs" : stats de jeu combinées saison+playoffs (moyenne pondérée par le
-        total de matchs), modèle salaire~performance réajusté sur cet échantillon combiné.
       - "playoffs" : stats de jeu playoffs SEULES, modèle salaire~performance de la saison
         régulière appliqué tel quel (PAS de nouveau fit, échantillon playoffs seul trop
         petit/biaisé — voir le diagnostic de faisabilité).
-    Dans les 3 cas, le salaire réel (salary_musd/salary_pct_cap) reste celui de la saison
-    régulière — c'est le seul qui existe réellement.
+    Dans les 2 cas, le salaire réel (salary_musd/salary_pct_cap) reste celui de la saison
+    régulière — c'est le seul qui existe réellement. Un 3e mode combiné ("regular_playoffs") a
+    existé puis a été retiré (décision explicite, voir le commentaire au-dessus de
+    PLAYOFF_PERIOD_STAT_COLS).
 
     Colonnes garanties : sport, season, player, team + toutes les clés de
     METRICS (certaines peuvent être NaN, ex. salaire/PER si le dataset
     Kaggle ne couvre pas encore la saison demandée, ou stats playoffs pour un joueur dont
     l'équipe n'a pas été qualifiée cette saison-là).
     """
-    if period not in ("regular", "regular_playoffs", "playoffs"):
-        raise ValueError(f"period invalide : {period!r} (attendu 'regular', 'regular_playoffs' ou 'playoffs')")
+    if period not in ("regular", "playoffs"):
+        raise ValueError(f"period invalide : {period!r} (attendu 'regular' ou 'playoffs')")
 
     cache_suffix = "" if period == "regular" else f"_{period}"
     processed_path = NBA_PROCESSED_DIR / f"{season}{cache_suffix}.parquet"
@@ -1119,7 +1095,7 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
 
     # --- Base "saison régulière" : TOUJOURS calculée, quel que soit `period` -- utilisée telle
     # quelle pour period="regular", et comme RÉFÉRENCE (modèle ajusté + stats de normalisation de
-    # poste) pour "regular_playoffs" (refit propre) et "playoffs" (pas de refit, voir plus haut).
+    # poste) pour "playoffs" (pas de refit, voir plus haut).
     reg_stats_raw = _fetch_nba_api_stats(season, force_refresh=force_refresh)
     reg_merged, reg_fit_mask = _enrich_stats(reg_stats_raw, season, force_refresh)
 
@@ -1130,18 +1106,6 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
         working = compute_value_added(
             reg_merged, salary_col="salary", performance_cols=VALUE_ADDED_PERFORMANCE_COLS,
             fit_mask=reg_fit_mask,
-        )
-    elif period == "regular_playoffs":
-        po_stats_raw = _fetch_nba_api_stats_playoffs(season, force_refresh=force_refresh)
-        combined_stats_raw = _combine_regular_playoffs_stats(reg_stats_raw, po_stats_raw)
-        combined_merged, combined_fit_mask = _enrich_stats(combined_stats_raw, season, force_refresh)
-        # Refit propre sur l'échantillon combiné (sain statistiquement, voir diagnostic de
-        # faisabilité : l'échantillon de fit reste quasi identique à celui de la saison
-        # régulière seule -- 97% des joueurs de playoffs dépassaient déjà MIN_GAMES_FOR_FIT en
-        # saison régulière avant même d'ajouter les playoffs).
-        working = compute_value_added(
-            combined_merged, salary_col="salary", performance_cols=VALUE_ADDED_PERFORMANCE_COLS,
-            fit_mask=combined_fit_mask,
         )
     else:  # "playoffs"
         po_stats_raw = _fetch_nba_api_stats_playoffs(season, force_refresh=force_refresh)

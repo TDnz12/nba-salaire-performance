@@ -5,8 +5,8 @@ Chaque module de sport (nba.py, rugby.py, foot.py, ...) doit exposer :
     - get_player_stats(season: str, force_refresh: bool = False, period: str = "regular")
       -> pd.DataFrame — DataFrame normalisé selon le schéma commun défini dans base.py.
       `period` est optionnel (par défaut "regular", comportement historique) : pour la NBA,
-      voir data_sources/nba.py pour les valeurs acceptées ("regular"/"regular_playoffs"/
-      "playoffs") — un sport sans notion de playoffs peut ignorer ce paramètre.
+      voir data_sources/nba.py pour les valeurs acceptées ("regular"/"playoffs") — un sport sans
+      notion de playoffs peut ignorer ce paramètre.
     - SEASONS: list[str]  -> saisons disponibles dans le sélecteur
     - METRICS: dict[str, Metric] -> métriques sélectionnables en X/Y
 
