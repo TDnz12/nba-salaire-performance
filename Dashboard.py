@@ -111,7 +111,12 @@ ALL_SEASONS_LABEL = f"Toutes les saisons ({sport.seasons[-1]} → {sport.seasons
 ALL_SEASONS_KEYS = list(sport.seasons)
 
 season_options = [ALL_SEASONS_LABEL] + sport.seasons
-_default_season = "2025-26" if "2025-26" in sport.seasons else sport.seasons[0]
+# "2024-25" (pas la saison la plus récente de sport.seasons) : décision explicite, temporaire --
+# le dataset Kaggle ratin21 ne couvre pas encore 2025-26 (100% des salaires y sont un repli sur
+# la saison précédente, voir le st.warning dynamique plus bas et METHODOLOGY.md). À repasser sur
+# la plus récente une fois ratin21 mis à jour ; sport.seasons[0] reste la plus récente couverte
+# par nba_api (stats de jeu), toujours sélectionnable manuellement dans ce sélecteur entre-temps.
+_default_season = "2024-25" if "2024-25" in sport.seasons else sport.seasons[0]
 season = st.sidebar.selectbox(
     "Saison", options=season_options, index=season_options.index(_default_season)
 )
@@ -517,6 +522,26 @@ if missing_salary and "salary_musd" in (x_key, y_key, color_key):
         "⚠️ Aucun salaire trouvé pour cette saison. Le dataset Kaggle n'est peut-être pas "
         "encore configuré (voir `README.md` — téléchargement manuel possible) ou ne couvre "
         "pas encore cette saison."
+    )
+
+# Avertissement visible (st.warning, pas juste le badge "Inclure les salaires estimés" de la
+# sidebar) quand la quasi-totalité des salaires de la saison affichée sont un repli
+# (salary_is_estimated=True) -- distinct du cas "aucun salaire du tout" ci-dessus : ici il Y A
+# des chiffres, mais ils viennent presque tous d'une AUTRE saison. Détecté dynamiquement (seuil
+# 90%, pas un season == "2025-26" en dur) plutôt que sur un numéro de saison fixe : se résorbe
+# tout seul dès que le dataset Kaggle sera mis à jour pour couvrir la saison manquante, sans
+# qu'il faille penser à retirer un test devenu obsolète (proposition validée, piste "source
+# complémentaire" écartée -- repéré sur 2025-26 : dataset ratin21 qui s'arrête à 2024-25, 100%
+# des 442 salaires de 2025-26 affichés étaient en réalité repris de la saison précédente).
+n_priced = int(df["salary_musd"].notna().sum()) if "salary_musd" in df.columns else 0
+n_estimated_early = int(df.get("salary_is_estimated", pd.Series(dtype=bool)).sum())
+if n_priced and (n_estimated_early / n_priced) >= 0.9:
+    st.warning(
+        f"⚠️ Les salaires de {season} ne sont pas encore disponibles dans la source de données "
+        "(dataset Kaggle pas encore mis à jour pour cette saison) — les valeurs affichées "
+        "(salaire, salaire attendu, valeur ajoutée) sont en réalité reprises en repli de la "
+        "saison précédente disponible, **pas** les vrais chiffres de cette saison. Redeviendra "
+        "correct automatiquement dès que le dataset sera mis à jour (aucune date connue)."
     )
 
 value_added_keys = {

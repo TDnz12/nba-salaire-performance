@@ -88,9 +88,12 @@ STATS_PERIOD_OPTIONS = {
     "Playoffs uniquement": "playoffs",
 }
 
+# "2024-25" par défaut : même raison temporaire que Dashboard.py/pages/1_Radar_de_comparaison.py
+# (dataset Kaggle ratin21 pas encore à jour pour 2025-26) -- ce classement affiche directement le
+# salaire, donc particulièrement concerné (voir le st.warning dynamique plus bas).
 season = st.sidebar.selectbox(
     "Saison", options=sport.seasons,
-    index=sport.seasons.index("2025-26") if "2025-26" in sport.seasons else 0,
+    index=sport.seasons.index("2024-25") if "2024-25" in sport.seasons else 0,
 )
 stats_period_label = st.sidebar.selectbox(
     "Statistiques utilisées", options=list(STATS_PERIOD_OPTIONS.keys()), index=0,
@@ -112,6 +115,22 @@ except Exception as exc:
 if df.empty:
     st.warning(f"Aucune donnée disponible pour {season}.")
     st.stop()
+
+# Même avertissement dynamique que Dashboard.py (dupliqué, voir son commentaire pour le détail
+# complet) : ce classement affiche Salaire réel/attendu en colonnes directes, donc encore plus
+# directement concerné par le retard du dataset Kaggle sur la saison courante que le scatter
+# principal. Détection sur le taux réel de salary_is_estimated (pas un season == "2025-26" en
+# dur) : se résorbe tout seul dès que le dataset sera mis à jour.
+n_priced = int(df["salary_musd"].notna().sum()) if "salary_musd" in df.columns else 0
+n_estimated_early = int(df.get("salary_is_estimated", pd.Series(dtype=bool)).sum())
+if n_priced and (n_estimated_early / n_priced) >= 0.9:
+    st.warning(
+        f"⚠️ Les salaires de {season} ne sont pas encore disponibles dans la source de données "
+        "(dataset Kaggle pas encore mis à jour pour cette saison) — les colonnes Salaire "
+        "réel/attendu/Valeur ajoutée ci-dessous sont en réalité reprises en repli de la saison "
+        "précédente disponible, **pas** les vrais chiffres de cette saison. Redeviendra correct "
+        "automatiquement dès que le dataset sera mis à jour (aucune date connue)."
+    )
 
 # Poste / Équipe : multiselect vide = pas de filtre (même convention que team_filter dans
 # Dashboard.py), pas une liste pré-cochée qui masquerait tout par défaut.

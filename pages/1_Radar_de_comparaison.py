@@ -102,10 +102,15 @@ preselected_season = st.session_state.pop("radar_preselect_season", None)
 # l'utilisateur au moindre autre widget touché ensuite (repéré en testant : la saison et le
 # joueur A revenaient à leur valeur par défaut dès qu'on changeait la période, par exemple). La
 # pré-sélection n'est donc écrite dans session_state qu'UNE fois, si la clé n'existe pas déjà.
+# "2024-25" par défaut (pas la saison la plus récente) : même raison temporaire que Dashboard.py
+# (dataset Kaggle ratin21 pas encore à jour pour 2025-26, voir son commentaire) -- le radar
+# n'affiche pas le salaire directement, mais reste sur la même saison par défaut que le reste de
+# l'app pour la cohérence. Sans incidence sur les axes du radar eux-mêmes (aucun n'est dérivé du
+# salaire).
 if "radar_season" not in st.session_state:
     st.session_state["radar_season"] = (
         preselected_season if preselected_season in sport.seasons
-        else ("2025-26" if "2025-26" in sport.seasons else sport.seasons[0])
+        else ("2024-25" if "2024-25" in sport.seasons else sport.seasons[0])
     )
 season = st.sidebar.selectbox("Saison", options=sport.seasons, key="radar_season")
 stats_period_label = st.sidebar.selectbox(
