@@ -44,7 +44,7 @@ matchs (ex: 4-11) peut avoir une moyenne par match gonflée par un simple coup d
 qu'une vraie performance de saison — même risque que les rookies, sur un axe différent. Ces
 joueurs sont donc **exclus du fit** (`fit_mask` combine `~is_rookie_scale` et
 `~low_sample_size`) mais **pas de l'affichage** : ils reçoivent quand même un salaire attendu
-(prédit à partir de la ligne de marché ajustée sur les autres), et `app.py` les distingue
+(prédit à partir de la ligne de marché ajustée sur les autres), et `Dashboard.py` les distingue
 visuellement dans le scatter plot (losange plutôt que rond, même remplissage coloré que le
 reste du graph — seule la forme change, badge dans le tableau détaillé) via la colonne
 `low_sample_size`, sans les cacher du classement. Un second slider dans la sidebar ("Nombre de

@@ -17,7 +17,7 @@ Dashboard interactif qui croise stats de jeu et salaires NBA pour repérer les j
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run Dashboard.py
 ```
 
 > Si ton dossier de projet est synchronisé avec iCloud Drive (réglage "Bureau et Documents" sur Mac), déplace plutôt le `.venv` hors du dossier synchronisé (`python3 -m venv ~/.venvs/nom-du-projet`). iCloud a tendance à évincer les milliers de petits fichiers d'un environnement virtuel vers le cloud, ce qui peut rendre chaque lancement très lent.
@@ -59,7 +59,7 @@ PYTHONPATH=. python scripts/prefill_cache.py --force     # tout recalculer
 ## Architecture
 
 ```
-app.py                       # UI Streamlit, ne connaît que data_sources.SPORTS
+Dashboard.py                 # UI Streamlit, ne connaît que data_sources.SPORTS
 data_sources/
   base.py                     # schéma commun, cache parquet
   nba.py                      # logique spécifique NBA
@@ -70,7 +70,7 @@ scripts/
   prefill_cache.py
 ```
 
-Ajouter un sport revient à créer `data_sources/<sport>.py` avec une fonction `get_player_stats()` et l'enregistrer dans `data_sources/__init__.py` — rien à changer dans `app.py`, le sélecteur de sport et les graphiques se construisent automatiquement à partir du registre.
+Ajouter un sport revient à créer `data_sources/<sport>.py` avec une fonction `get_player_stats()` et l'enregistrer dans `data_sources/__init__.py` — rien à changer dans `Dashboard.py`, le sélecteur de sport et les graphiques se construisent automatiquement à partir du registre.
 
 ## Méthodologie : le modèle de valeur ajoutée
 

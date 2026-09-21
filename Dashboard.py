@@ -157,7 +157,7 @@ def load_all_seasons_data(sport_key: str, season_keys: tuple[str, ...], force_re
     period="regular" volontairement EN DUR (pas paramétrable) : la trajectoire reste TOUJOURS en
     saison régulière, quel que soit le choix fait dans le sélecteur "Statistiques utilisées" de
     la sidebar — celui-ci n'agit que sur le scatter plot principal. Décision explicite, pas un
-    oubli (voir aussi team_ranking_source_df un peu plus bas dans app.py, même principe)."""
+    oubli (voir aussi team_ranking_source_df un peu plus bas dans ce fichier, même principe)."""
     frames, failed = [], []
     for s in season_keys:
         try:
@@ -266,6 +266,25 @@ searched_player = st.sidebar.selectbox(
     index=0,
     help="Tape un nom pour filtrer la liste. Le joueur sélectionné est entouré sur le graph.",
 )
+
+def _handle_radar_click() -> None:
+    # Exécuté par Streamlit avant le switch de page (callback on_click, même mécanisme que
+    # _handle_refresh_click plus bas) : dépose le joueur/la saison dans st.session_state, lus
+    # puis pop() par la page radar pour ne pré-sélectionner qu'une fois (même pattern que
+    # _pending_force_refresh). st.switch_page ici plutôt que dans le corps du script : un
+    # switch_page() appelé en dehors d'un callback interromprait immédiatement le script AVANT
+    # que le reste de la sidebar (filtres, bouton Rafraîchir...) n'ait fini de s'afficher.
+    st.session_state["radar_preselect_player"] = searched_player
+    st.session_state["radar_preselect_season"] = None if is_all_seasons else season
+    st.switch_page("pages/1_Radar_de_comparaison.py")
+
+
+if searched_player != "Aucun":
+    st.sidebar.button(
+        "🎯 Voir le profil radar", on_click=_handle_radar_click,
+        help="Ouvre la vue radar de comparaison de profils avec ce joueur pré-sélectionné.",
+    )
+
 teams = sorted(df["team"].dropna().unique().tolist())
 team_filter = st.sidebar.multiselect("Filtrer par équipe (optionnel)", options=teams)
 
@@ -834,7 +853,13 @@ with st.expander("ℹ️ Sources des données et méthodologie du modèle", expa
                 "R²": "{:.2f}", "Marge (± M$)": "{:.1f}",
                 "Médiane (M$)": "{:+.1f}", "Q1 (M$)": "{:+.1f}", "Q3 (M$)": "{:+.1f}",
             }),
-            width='stretch', height=min(400, 38 * (len(value_added_per_season_df) + 1)),
+            # use_container_width (pas width='stretch') : repéré en local que st.dataframe (à la
+            # différence de st.plotly_chart) crashe sur width='stretch' avec un streamlit trop
+            # ancien (TypeError 'stretch' has type str, but expected int) -- ici précisément parce
+            # que le mauvais interpréteur tournait (anaconda 1.32.0 au lieu du .venv du projet,
+            # confirmé). use_container_width reste universellement supporté, sans dépendre de
+            # l'environnement effectivement utilisé pour lancer l'app.
+            use_container_width=True, height=min(400, 38 * (len(value_added_per_season_df) + 1)),
         )
 
 with st.expander("📋 Voir les données détaillées"):
@@ -843,7 +868,7 @@ with st.expander("📋 Voir les données détaillées"):
         display_cols += [c for c in ("games_played", symbol_key) if c not in display_cols]
     st.dataframe(
         plot_df[display_cols].sort_values(y_key, ascending=False).reset_index(drop=True),
-        width='stretch',
+        use_container_width=True,  # voir commentaire ci-dessus (expander méthodologie)
     )
 
 # --------------------------------------------------------------------------

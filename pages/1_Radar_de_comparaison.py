@@ -1,0 +1,322 @@
+"""
+Radar de comparaison de joueurs — page séparée du dashboard principal (Dashboard.py, qui ne change
+pas de comportement), voir la proposition validée. Page Streamlit indépendante (système
+multi-page natif basé sur le dossier pages/ à côté de Dashboard.py) : exécutée du début à la fin à
+chaque interaction comme n'importe quel script Streamlit, mais partage st.session_state avec
+Dashboard.py — c'est ce qui permet au bouton "🎯 Voir le profil radar" de la sidebar principale de
+pré-sélectionner un joueur ici via st.switch_page().
+
+Duplique volontairement quelques petits éléments de Dashboard.py (bloc CSS de densité, fonction de
+chargement mise en cache, dict des libellés de période) plutôt que de les importer depuis
+Dashboard.py : un fichier de pages/ est un script Streamlit à part entière, pas un module — l'importer
+depuis Dashboard.py ré-exécuterait tout Dashboard.py (set_page_config compris). La duplication reste petite
+et sans logique métier (celle-ci vit dans data_sources/nba.py, réutilisée telle quelle ici).
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+from data_sources import SPORTS
+
+st.set_page_config(page_title="Radar de comparaison — Sports Analytics", page_icon="🎯", layout="wide")
+
+# Même bloc de densité que Dashboard.py (voir son commentaire d'origine) — dupliqué ici pour que cette
+# page ait la même respiration visuelle que le dashboard principal, sans dépendre de Dashboard.py.
+st.markdown(
+    """
+    <style>
+    div[data-testid="stAppViewBlockContainer"], .block-container {
+        padding-top: 1.5rem !important;
+    }
+    div[data-testid="stAppViewBlockContainer"] h1:first-of-type {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    section[data-testid="stSidebar"] {
+        padding-top: 0 !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"] {
+        padding-top: 0.25rem !important;
+    }
+    section[data-testid="stSidebar"] h1:first-of-type {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+        gap: 0.7rem !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stElementContainer"] {
+        margin-bottom: 0.3rem !important;
+    }
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        margin-top: 0.4rem !important;
+        margin-bottom: 0.4rem !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+    section[data-testid="stSidebar"] hr {
+        margin: 0.4rem 0 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.sidebar.title("🎯 Radar de comparaison")
+
+# MVP : NBA uniquement (radar_axes/compute_radar_scores optionnels sur SportConfig, None pour
+# les sports pas encore actifs) — pas de sélecteur de sport ici, contrairement à Dashboard.py, tant
+# qu'un second sport n'a pas sa propre implémentation radar.
+sport = SPORTS["nba"]
+if not sport.radar_axes or sport.compute_radar_scores is None:
+    st.title("🎯 Radar de comparaison")
+    st.info("Le radar de comparaison n'est pas encore disponible pour ce sport.")
+    st.stop()
+
+axes = sport.radar_axes
+
+# Même dict que STATS_PERIOD_OPTIONS dans Dashboard.py (dupliqué, voir docstring du module) : reste
+# cohérent avec ce que "les stats" veulent dire ailleurs dans l'app.
+STATS_PERIOD_OPTIONS = {
+    "Saison régulière": "regular",
+    "Saison + Playoffs (agrégé)": "regular_playoffs",
+    "Playoffs uniquement": "playoffs",
+}
+
+# Pré-sélection déposée par Dashboard.py (bouton "🎯 Voir le profil radar") — pop() pour ne
+# pré-sélectionner qu'une fois, même pattern que _pending_force_refresh dans Dashboard.py.
+preselected_player = st.session_state.pop("radar_preselect_player", None)
+preselected_season = st.session_state.pop("radar_preselect_season", None)
+
+
+# key= (pas index=) pour que le choix de l'utilisateur survive aux reruns suivants : passer un
+# index recalculé à chaque script (dérivé de preselected_season, qui redevient None après le
+# pop() ci-dessus) sans clé stable ferait considérer par Streamlit qu'il s'agit d'un widget
+# différent à chaque run où cet index change -- perdant silencieusement la sélection de
+# l'utilisateur au moindre autre widget touché ensuite (repéré en testant : la saison et le
+# joueur A revenaient à leur valeur par défaut dès qu'on changeait la période, par exemple). La
+# pré-sélection n'est donc écrite dans session_state qu'UNE fois, si la clé n'existe pas déjà.
+if "radar_season" not in st.session_state:
+    st.session_state["radar_season"] = (
+        preselected_season if preselected_season in sport.seasons
+        else ("2025-26" if "2025-26" in sport.seasons else sport.seasons[0])
+    )
+season = st.sidebar.selectbox("Saison", options=sport.seasons, key="radar_season")
+stats_period_label = st.sidebar.selectbox(
+    "Statistiques utilisées", options=list(STATS_PERIOD_OPTIONS.keys()), index=0,
+)
+stats_period = STATS_PERIOD_OPTIONS[stats_period_label]
+
+
+@st.cache_data(show_spinner="Chargement des données NBA (nba_api + Kaggle)...")
+def load_data(sport_key: str, season: str, period: str) -> pd.DataFrame:
+    return SPORTS[sport_key].get_player_stats(season, force_refresh=False, period=period)
+
+
+try:
+    df = load_data(sport.key, season, stats_period)
+except Exception as exc:
+    st.error(f"Impossible de charger les données pour {season} : {exc}")
+    st.stop()
+
+if df.empty:
+    st.warning(f"Aucune donnée disponible pour {season}.")
+    st.stop()
+
+df = sport.compute_radar_scores(df)
+
+# Un joueur sans aucun match sur la période (ex: n'a pas fait les playoffs) aurait un radar
+# entièrement vide — exclu de la liste plutôt que proposé pour un résultat vide/trompeur.
+eligible = df[df["games_played"].fillna(0) > 0]
+player_options = sorted(eligible["player"].dropna().unique().tolist())
+
+if not player_options:
+    st.warning(f"Aucun joueur avec des données exploitables pour {season} ({stats_period_label}).")
+    st.stop()
+
+# Même raison que pour "Saison" ci-dessus (key= plutôt qu'index= recalculé à chaque run) --
+# avec en plus une validité à revérifier à CHAQUE run (pas seulement à la création) : changer de
+# saison/période change player_options, et une valeur déjà en session_state peut ne plus en
+# faire partie (joueur absent de la nouvelle saison/période) -- st.selectbox lève une erreur si
+# la valeur de key= n'est pas dans options, d'où ce repli explicite plutôt que de laisser planter.
+if "radar_player_a" not in st.session_state:
+    st.session_state["radar_player_a"] = (
+        preselected_player if preselected_player in player_options else player_options[0]
+    )
+elif st.session_state["radar_player_a"] not in player_options:
+    st.session_state["radar_player_a"] = player_options[0]
+player_a = st.sidebar.selectbox("Joueur A", options=player_options, key="radar_player_a")
+
+player_b_options = ["Aucun"] + [p for p in player_options if p != player_a]
+if st.session_state.get("radar_player_b") not in player_b_options:
+    st.session_state["radar_player_b"] = "Aucun"
+player_b = st.sidebar.selectbox("Joueur B (optionnel)", options=player_b_options, key="radar_player_b")
+
+if preselected_player and preselected_player not in player_options:
+    st.info(
+        f"🔍 **{preselected_player}** n'a pas de données exploitables pour {season} "
+        f"({stats_period_label}) — sélectionne une autre saison ou un autre joueur."
+    )
+
+st.title(f"🎯 Radar de comparaison — {season}")
+
+# Toggle Indice / Centile (inspiré de Data'Scout) : les deux lisent les colonnes déjà calculées
+# par compute_radar_scores (radar_<key>_score / radar_<key>_percentile), même référence (poste +
+# saison/période + MIN_GAMES_FOR_FIT) dans les deux cas -- seule la façon de lire l'écart à cette
+# référence change (écart-type mis à l'échelle vs rang direct).
+display_mode = st.radio(
+    "Mode d'affichage", options=["Indice", "Centile"], index=0, horizontal=True,
+    help=(
+        "Indice : z-score par poste clippé à ±3 écarts-types, mis à l'échelle 0-100 (50 = "
+        "moyenne du poste). Centile : rang percentile réel dans la même population "
+        "(poste + saison/période + seuil de matchs joués) -- ex. 90 = ce joueur fait mieux que "
+        "90% des joueurs de référence à son poste sur cet axe."
+    ),
+)
+score_suffix = "_score" if display_mode == "Indice" else "_percentile"
+score_unit = "/100" if display_mode == "Indice" else "ᵉ centile"
+st.caption(
+    "Chaque axe est un z-score par poste (Intérieur / Ailier / Extérieur), même méthode que le "
+    "modèle de valeur ajoutée du dashboard principal." + (
+        " Affiché ici mis à l'échelle 0-100 pour la lecture (clip à ±3 écarts-types) — 50 = dans "
+        "la moyenne des joueurs à son poste sur cet axe."
+        if display_mode == "Indice" else
+        " Affiché ici en rang percentile direct (rang / effectif) dans la même population de "
+        "référence — 90 = ce joueur fait mieux que 90% des joueurs de référence à son poste."
+    )
+)
+
+PLAYER_COLORS = {"A": ("#1f77b4", "rgba(31,119,180,0.25)"), "B": ("#FF7F0E", "rgba(255,127,14,0.25)")}
+# Décalé haut/bas par joueur : à 10 axes, deux joueurs avec des scores proches sur un même axe
+# (repéré en rendu réel : ex. 66 vs 69) verraient sinon leurs deux labels texte se chevaucher
+# exactement au même point -- un décalage par joueur les sépare verticalement au lieu de les
+# superposer, sans changer la position du point/marker lui-même.
+PLAYER_TEXT_POSITION = {"A": "top center", "B": "bottom center"}
+
+
+def _player_row(player_name: str) -> pd.Series | None:
+    row = df[df["player"] == player_name]
+    if row.empty:
+        return None
+    return row.iloc[0]
+
+
+# Petites cartes par joueur (esprit Data'Scout) au-dessus du radar, dans la couleur qui lui est
+# associée sur le graph -- seule la bordure/l'accent est colorée, le texte reste dans la couleur
+# héritée du thème Streamlit (currentColor) pour rester lisible en clair comme en sombre, sans
+# pouvoir détecter le thème réel du visiteur côté Python (voir plus bas pour la même contrainte
+# sur le fond du radar).
+def _player_card(column, player_name: str, color: str) -> None:
+    row = _player_row(player_name)
+    with column:
+        games = row.get("games_played") if row is not None else None
+        games_txt = f"{games:.0f} match(s) pris en compte" if row is not None and pd.notna(games) else "—"
+        st.markdown(
+            f"""<div style="border-left: 4px solid {color}; padding: 0.3rem 0.9rem;">
+            <div style="font-weight: 600; font-size: 1.05rem;">{player_name}</div>
+            <div style="opacity: 0.7; font-size: 0.85rem;">{season} ({stats_period_label}) · {games_txt}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+
+card_cols = st.columns(2)
+_player_card(card_cols[0], player_a, PLAYER_COLORS["A"][0])
+if player_b != "Aucun":
+    _player_card(card_cols[1], player_b, PLAYER_COLORS["B"][0])
+
+theta_labels = [a["label"] for a in axes]
+theta_closed = theta_labels + [theta_labels[0]]
+
+fig = go.Figure()
+recap_rows = []
+
+for slot, player_name in (("A", player_a), ("B", player_b if player_b != "Aucun" else None)):
+    if player_name is None:
+        continue
+    row = _player_row(player_name)
+    if row is None:
+        st.info(f"🔍 **{player_name}** ne correspond à aucune donnée pour {season} ({stats_period_label}).")
+        continue
+    scores = [row.get(f"radar_{a['key']}{score_suffix}") for a in axes]
+    scores_filled = [0.0 if pd.isna(s) else float(s) for s in scores]
+    # Valeur affichée directement à côté de chaque point (pas seulement au survol) : "" pour un
+    # axe réellement manquant (NaN, distingué de scores_filled qui met 0.0 par défaut juste pour
+    # dessiner le contour) -- sinon un axe sans donnée afficherait un trompeur "0".
+    point_labels = ["" if pd.isna(s) else f"{s:.0f}" for s in scores]
+    line_color, fill_color = PLAYER_COLORS[slot]
+    fig.add_trace(go.Scatterpolar(
+        r=scores_filled + [scores_filled[0]],
+        theta=theta_closed,
+        fill="toself",
+        mode="lines+markers+text",
+        text=point_labels + [point_labels[0]],
+        textposition=PLAYER_TEXT_POSITION[slot],
+        textfont=dict(color=line_color, size=10),
+        name=player_name,
+        line=dict(color=line_color, width=2),
+        marker=dict(size=5, color=line_color),
+        fillcolor=fill_color,
+        hovertemplate="%{theta} : %{r:.0f}" + score_unit + "<extra>" + player_name + "</extra>",
+    ))
+    recap_row = {"Joueur": player_name}
+    for a, score in zip(axes, scores):
+        raw_val = row.get(a["stat_col"])
+        recap_row[a["label"]] = (
+            f"{raw_val:.1f}  ·  {score:.0f}{score_unit}" if pd.notna(raw_val) and pd.notna(score) else "—"
+        )
+    recap_rows.append(recap_row)
+
+if not fig.data:
+    st.warning("Sélectionne au moins un joueur pour afficher le radar.")
+    st.stop()
+
+# Fond du polar : st.plotly_chart (theme="streamlit" par défaut) réécrit automatiquement
+# paper_bgcolor/plot_bgcolor pour matcher le thème de l'app (clair/sombre selon le visiteur --
+# c'est ce qui rend déjà le scatter plot principal sombre malgré son propre template="plotly_white",
+# vérifié dans le bundle JS de Streamlit : PlotlyChart.*.js, fonction d'injection de thème). Mais
+# CETTE injection ne couvre PAS layout.polar (contrairement à layout.ternary, qui lui est bien
+# pris en charge) -- polar.bgcolor restait donc au blanc du template plotly_white, d'où le radar
+# en fond blanc alors que tout le reste de l'app suit le thème. Fix : bgcolor transparent pour
+# hériter du paper_bgcolor déjà correctement thémé par Streamlit, plutôt qu'une couleur fixe
+# (qui serait fausse pour un visiteur en thème clair -- indétectable depuis ce code Python).
+# Grille/texte de l'axe polaire : gris moyen choisi pour rester lisible sur fond clair ET sombre,
+# Streamlit ne thémant pas non plus ces couleurs pour les charts polaires.
+#
+# height/margin/range du radialaxis réglés à partir d'un rendu réel (kaleido) à 10 axes x 2
+# joueurs, pas au jugé : à height=550/range=[0,100] par défaut, le label "Scoring" chevauchait le
+# "100" du point juste en dessous, et le dernier axe ("Efficacité (TS%)", en bas) était coupé par
+# le bord du graph. height=680 + marges 90 de chaque côté + range=[0,122] (au lieu de [0,100],
+# pour laisser un espace radial entre le point à 100 et l'anneau des labels d'axes) corrigent les
+# deux -- revérifier visuellement si le nombre d'axes change encore.
+POLAR_AXIS_COLOR = "#888888"
+fig.update_layout(
+    polar=dict(
+        bgcolor="rgba(0,0,0,0)",
+        radialaxis=dict(
+            visible=True, range=[0, 122], tickvals=[0, 20, 40, 60, 80, 100], ticksuffix="",
+            gridcolor=POLAR_AXIS_COLOR, linecolor=POLAR_AXIS_COLOR, tickfont=dict(color=POLAR_AXIS_COLOR, size=9),
+        ),
+        angularaxis=dict(
+            direction="clockwise",
+            gridcolor=POLAR_AXIS_COLOR, linecolor=POLAR_AXIS_COLOR, tickfont=dict(color=POLAR_AXIS_COLOR),
+        ),
+    ),
+    paper_bgcolor="rgba(0,0,0,0)",
+    height=680,
+    legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0),
+    margin=dict(t=90, b=90, l=90, r=90),
+)
+st.plotly_chart(fig, width="stretch")
+
+for caveat in (sport.radar_caveats or []):
+    st.caption(caveat)
+
+if recap_rows:
+    with st.expander(f"📋 Valeurs brutes par axe (stat/match  ·  {display_mode.lower()})", expanded=True):
+        st.dataframe(pd.DataFrame(recap_rows).set_index("Joueur"), use_container_width=True)

@@ -101,7 +101,7 @@ ROOKIE_SCALE_MAX_YEARS = 4
 # l'exclusion des rookies (fit_mask), juste sur l'axe "nombre de matchs" plutôt que
 # "ancienneté". Les joueurs sous ce seuil reçoivent quand même une prédiction (comme les
 # rookies) ; seul l'AJUSTEMENT du modèle les exclut. Contrairement au fit, l'affichage ne les
-# masque pas : voir la colonne `low_sample_size` (utilisée par app.py pour les distinguer
+# masque pas : voir la colonne `low_sample_size` (utilisée par Dashboard.py pour les distinguer
 # visuellement sans les cacher).
 MIN_GAMES_FOR_FIT = 15
 
@@ -285,7 +285,7 @@ CHAMPIONS_BY_SEASON: dict[str, str] = {
 # automatiquement ignoré et recalculé (voir base.read_cache/write_cache) —
 # évite qu'un ancien cache reste silencieusement incomplet après un déploiement.
 PROCESSED_SCHEMA_VERSION = 16  # v16: ajout médiane/Q1/Q3 des résidus du modèle (musd + pct_cap), voir base.FittedValueModel.residuals
-# v15: ajout value_added_residual_std_pct_cap (bande d'incertitude de la trajectoire par joueur, app.py)
+# v15: ajout value_added_residual_std_pct_cap (bande d'incertitude de la trajectoire par joueur, Dashboard.py)
 # v14: extension historique 1996-97→2009-10 (dataset legacy) + colonnes salary_pct_cap/expected_salary_pct_cap/value_added_pct_cap
 # v13: ajout value_added_residual_std_musd + fix base.read_cache qui laissait fuiter _schema_version (collision de merge possible sur un cache déjà écrit)
 
@@ -379,7 +379,7 @@ def match_season_awards(df: pd.DataFrame, season: str) -> dict[str, list[str]]:
 
 
 # Icônes et libellés d'affichage pour les codes de récompenses de SEASON_AWARDS — ordre
-# d'insertion volontaire (MVP, DPOY, ROY, MIP, 6MOY, FINALS_MVP), réutilisé par app.py pour
+# d'insertion volontaire (MVP, DPOY, ROY, MIP, 6MOY, FINALS_MVP), réutilisé par Dashboard.py pour
 # construire le badge composite dans un ordre stable quand un joueur cumule plusieurs récompenses
 # la même saison (ex. SGA 2024-25 : MVP + Finals MVP -> "👑🎖️", pas l'inverse selon l'ordre
 # d'itération d'un dict non garanti). Choisies pour ne pas réutiliser une icône déjà présente
@@ -405,7 +405,7 @@ AWARD_LABELS: dict[str, str] = {
 
 def get_award_badges(df: pd.DataFrame) -> pd.Series:
     """Version multi-saisons de match_season_awards : pour un DataFrame `df` couvrant une ou
-    plusieurs saisons (colonnes `season` + `player`, ex. plot_df de app.py, en saison unique ou en
+    plusieurs saisons (colonnes `season` + `player`, ex. plot_df de Dashboard.py, en saison unique ou en
     mode "Toutes les saisons"), retourne une Series alignée sur df.index où chaque valeur est la
     LISTE (éventuellement vide) des codes de récompenses gagnées par ce joueur cette saison-là,
     dans l'ordre AWARD_ICONS.
@@ -1020,7 +1020,7 @@ def _substitute_playoffs_only_stats(regular_enriched: pd.DataFrame, playoffs: pd
     total) — pour period="playoffs". Un joueur absent de `playoffs` (n'a pas fait les playoffs
     cette saison) se retrouve avec games_played/stats de période à NaN : il disparaîtra du nuage
     comme n'importe quel joueur sans donnée sur les axes choisis (dropna déjà en place côté
-    app.py), pas de traitement spécial nécessaire ici. Le reste de la ligne (salaire, poste,
+    Dashboard.py), pas de traitement spécial nécessaire ici. Le reste de la ligne (salaire, poste,
     ancienneté, is_rookie_scale...) est conservé tel quel depuis `regular_enriched` — ces
     attributs ne dépendent pas de la période."""
     drop_cols = [c for c in PLAYOFF_PERIOD_STAT_COLS + ["games_played"] if c in regular_enriched.columns]
@@ -1167,7 +1167,7 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
     working["expected_salary_musd"] = working["expected_salary"] / 1_000_000
     working["value_added_musd"] = working["value_added"] / 1_000_000
     # Marge d'incertitude du modèle (écart-type des résidus sur l'échantillon de fit) — affichée
-    # dans l'infobulle à côté du salaire attendu, voir app.py._build_hover_text.
+    # dans l'infobulle à côté du salaire attendu, voir Dashboard.py._build_hover_text.
     working["value_added_residual_std_musd"] = working["value_added_residual_std"] / 1_000_000
     # Médiane et quartiles des résidus de l'échantillon de fit (voir base.apply_value_model) —
     # affichés dans l'expander méthodologie à côté de la marge (± écart-type) déjà là, pour voir
@@ -1187,7 +1187,7 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
     working["expected_salary_pct_cap"] = working["expected_salary"] / season_cap if season_cap else np.nan
     working["value_added_pct_cap"] = working["value_added"] / season_cap if season_cap else np.nan
     # Même marge d'incertitude que value_added_residual_std_musd, en % du plafond — utilisée par
-    # app.py pour la bande d'incertitude de la trajectoire de valeur ajoutée par joueur (largeur
+    # Dashboard.py pour la bande d'incertitude de la trajectoire de valeur ajoutée par joueur (largeur
     # variable par saison, le R² du modèle n'étant pas stable dans le temps : voir le diagnostic
     # de faisabilité, corrélation R²/année confirmée significative, p<0.001).
     working["value_added_residual_std_pct_cap"] = (
@@ -1227,3 +1227,147 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
             "tentative au prochain chargement.", season, period,
         )
     return working
+
+
+# --------------------------------------------------------------------------
+# Radar de comparaison de joueurs (voir pages/1_Radar_de_comparaison.py) — dix axes de skill
+# dérivés de colonnes déjà présentes dans get_player_stats (catalogue METRICS), normalisés par
+# poste avec la MÊME fonction (_zscore_by_position) que le modèle de valeur ajoutée, plutôt qu'un
+# nouveau système de normalisation (proposition validée). Section volontairement placée après
+# get_player_stats : fonctionnalité indépendante du pipeline principal, qui n'a besoin d'aucune
+# de ces colonnes.
+#
+# "Interceptions" et "Contres" (steals_per_game/blocks_per_game) étaient fusionnés en un seul axe
+# "Activité défensive" dans une version précédente -- séparés ici à la demande de l'utilisateur
+# (vraie granularité : anticipation/défense de périmètre vs protection du cercle, deux profils
+# différents). Chacun garde individuellement le même type de caveat que l'ancien composite
+# (proxy box-score, pas une vraie mesure de qualité défensive -- voir METHODOLOGY.md, section
+# "Métrique défensive individuelle").
+#
+# "Sécurité de balle" (turnovers_per_game) est le seul axe où la stat brute va dans le sens
+# INVERSE des autres (moins de pertes de balle = meilleur) -- `invert=True` signale qu'il faut
+# calculer le z-score/percentile sur la stat NÉGÉE (voir compute_radar_scores), pour que "loin du
+# centre = meilleur" reste vrai sur tous les axes du radar, y compris celui-ci. `stat_col` reste
+# la colonne brute réelle (turnovers_per_game) pour l'affichage de la valeur/match dans le
+# tooltip et le tableau récap -- seul le calcul du z-score/percentile utilise la version négée.
+RADAR_STEALS_CAVEAT = (
+    " ⚠️ \"Interceptions\" (steals) favorise structurellement les joueurs actifs sur le ballon "
+    "(arrières/ailiers qui multiplient les prises de risque défensives) — un intérieur qui "
+    "défend par positionnement peut en avoir peu sans être un mauvais défenseur. Proxy "
+    "box-score, pas une vraie mesure de qualité défensive individuelle (voir METHODOLOGY.md)."
+)
+RADAR_BLOCKS_CAVEAT = (
+    " ⚠️ \"Contres\" (blocks) favorise structurellement les intérieurs (proximité du cercle) — "
+    "un extérieur qui en a peu n'est pas nécessairement moins bon défenseur, ce n'est simplement "
+    "pas son registre. Proxy box-score, pas une vraie mesure de qualité défensive individuelle "
+    "(voir METHODOLOGY.md)."
+)
+# "Sécurité de balle" a DEUX caveats distincts (d'où "caveats", une liste, sur cet axe -- les
+# autres axes à caveat n'en ont qu'un) : le biais de volume ci-dessous (même famille que les
+# caveats Interceptions/Contres -- un proxy box-score influencé par le rôle, pas une vraie mesure
+# pure) et la note d'inversion (comment lire l'axe, pas un biais). Un meneur à fort volume de jeu
+# porte le ballon beaucoup plus souvent qu'un rôleur -- il perd donc mécaniquement plus de ballons
+# en ABSOLU (turnovers_per_game n'est pas normalisé par possessions/touches), même s'il est aussi
+# fiable balle en main que ce rôleur. Contrairement à Interceptions/Contres (biais de poste),
+# celui-ci est un biais de RÔLE OFFENSIF (volume de jeu), mais le principe est le même : proxy
+# box-score, pas une mesure pure de fiabilité individuelle indépendante du rôle.
+RADAR_TURNOVERS_BIAS_CAVEAT = (
+    " ⚠️ \"Sécurité de balle\" reste corrélée au volume de jeu : un meneur à fort volume "
+    "(beaucoup de possessions, porteur de balle principal) perd mécaniquement plus de ballons en "
+    "absolu qu'un joueur à faible volume, même s'il est tout aussi fiable balle en main. Pas une "
+    "mesure pure de fiabilité individuelle, indépendante du rôle offensif."
+)
+RADAR_TURNOVERS_NOTE = (
+    " ℹ️ Axe inversé : moins de pertes de balle par match donne un score PLUS élevé sur cet axe, "
+    "pour rester cohérent avec le reste du radar (plus loin du centre = meilleur, partout)."
+)
+
+RADAR_AXES: list[dict] = [
+    {"key": "scoring", "label": "Scoring", "stat_col": "points_per_game"},
+    {"key": "passe", "label": "Passe", "stat_col": "assists_per_game"},
+    {"key": "rebond", "label": "Rebond", "stat_col": "rebounds_per_game"},
+    {"key": "interceptions", "label": "Interceptions", "stat_col": "steals_per_game", "caveats": [RADAR_STEALS_CAVEAT]},
+    {"key": "contres", "label": "Contres", "stat_col": "blocks_per_game", "caveats": [RADAR_BLOCKS_CAVEAT]},
+    {"key": "efficacite", "label": "Efficacité (TS%)", "stat_col": "ts_pct"},
+    {"key": "impact", "label": "Impact global (PIE)", "stat_col": "pie"},
+    {"key": "tir_exterieur", "label": "Tir extérieur (3PT%)", "stat_col": "fg3_pct"},
+    {
+        "key": "securite_balle", "label": "Sécurité de balle", "stat_col": "turnovers_per_game",
+        "invert": True, "caveats": [RADAR_TURNOVERS_BIAS_CAVEAT, RADAR_TURNOVERS_NOTE],
+    },
+    {"key": "lancers_francs", "label": "Lancers francs (LF%)", "stat_col": "ft_pct"},
+]
+
+# Collectés depuis RADAR_AXES plutôt que maintenus séparément : évite qu'un axe ajouté/retiré avec
+# un caveat soit oublié ici.
+RADAR_CAVEATS: list[str] = [c for a in RADAR_AXES for c in a.get("caveats", [])]
+
+
+def _percentile_by_position(
+    stat_source: pd.DataFrame, apply_to: pd.DataFrame, impact_col: str, stat_mask: pd.Series
+) -> pd.Series:
+    """Rang percentile de `impact_col` PAR GROUPE DE POSTE — même principe et mêmes paramètres
+    que _zscore_by_position (même `stat_source`/`apply_to`/`stat_mask`), en rang plutôt qu'en
+    écart-type : pourcentage de joueurs de RÉFÉRENCE (même poste, lignes de `stat_source` où
+    `stat_mask` est vrai) que ce joueur égale ou dépasse sur cet axe. Calcul volontairement simple
+    (rang / effectif, via np.searchsorted) plutôt qu'une fonction de bibliothèque externe (évite
+    une dépendance à scipy pour un calcul déjà trivial avec numpy/pandas)."""
+    ref = stat_source.loc[stat_mask]
+    result = pd.Series(np.nan, index=apply_to.index, dtype=float)
+    for group, ref_group in ref.groupby("position_group"):
+        values = np.sort(ref_group[impact_col].dropna().to_numpy())
+        n = len(values)
+        if n == 0:
+            continue
+        in_group = apply_to["position_group"] == group
+        col_vals = apply_to.loc[in_group, impact_col]
+        valid = col_vals.notna()
+        idx = col_vals[valid].index
+        ranks = np.searchsorted(values, col_vals[valid].to_numpy(), side="right")
+        result.loc[idx] = ranks / n * 100
+    return result
+
+
+def compute_radar_scores(df: pd.DataFrame, min_games: int = MIN_GAMES_FOR_FIT) -> pd.DataFrame:
+    """Ajoute, pour chaque axe de RADAR_AXES, sur la même référence (population de `df` ayant
+    joué au moins `min_games` matchs — réutilise MIN_GAMES_FOR_FIT, même seuil que le modèle
+    salaire — groupée par poste) :
+      - `radar_<key>_z` : z-score (_zscore_by_position, même fonction que le modèle de valeur
+        ajoutée) et sa mise à l'échelle [0, 100] pour affichage radar (`radar_<key>_score`, clip
+        à ±3 écarts-types puis rescale linéaire) — mode "Indice" de la page radar.
+      - `radar_<key>_percentile` : rang percentile (_percentile_by_position) — mode "Centile".
+    Les deux sont ensuite appliqués à TOUT `df`, y compris les échantillons courts sous ce seuil
+    (comme le scatter principal, affichés mais pas dans la référence).
+
+    Un axe avec `invert=True` (voir RADAR_AXES -- actuellement "Sécurité de balle") calcule son
+    z-score/percentile sur l'OPPOSÉ de `stat_col` (colonne temporaire, supprimée avant de
+    retourner) : `stat_col` lui-même n'est jamais modifié, il reste la vraie valeur/match pour
+    l'affichage (tooltip, tableau récap) -- seul le calcul de position dans le radar est inversé."""
+    result = df.copy()
+
+    if "position_group" not in result.columns:
+        for axis in RADAR_AXES:
+            result[f"radar_{axis['key']}_z"] = np.nan
+            result[f"radar_{axis['key']}_score"] = np.nan
+            result[f"radar_{axis['key']}_percentile"] = np.nan
+        return result
+
+    stat_mask = result["games_played"].fillna(0) >= min_games
+    temp_cols = []
+    for axis in RADAR_AXES:
+        col = axis["stat_col"]
+        if col not in result.columns:
+            result[f"radar_{axis['key']}_z"] = np.nan
+            result[f"radar_{axis['key']}_score"] = np.nan
+            result[f"radar_{axis['key']}_percentile"] = np.nan
+            continue
+        z_col = col
+        if axis.get("invert"):
+            z_col = f"_radar_{axis['key']}_inverted"
+            result[z_col] = -result[col]
+            temp_cols.append(z_col)
+        z = _zscore_by_position(result, result, z_col, stat_mask)
+        result[f"radar_{axis['key']}_z"] = z
+        result[f"radar_{axis['key']}_score"] = (z.clip(-3, 3) + 3) / 6 * 100
+        result[f"radar_{axis['key']}_percentile"] = _percentile_by_position(result, result, z_col, stat_mask)
+    return result.drop(columns=temp_cols)
