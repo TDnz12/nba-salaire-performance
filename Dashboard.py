@@ -122,13 +122,17 @@ is_all_seasons = season == ALL_SEASONS_LABEL
 # data_sources/nba.py pour le détail des 3 options, issu du diagnostic de faisabilité playoffs).
 # Volontairement limité au mode saison unique (complexité déjà présente en mode "Toutes les
 # saisons" — bascule $/%, trajectoire, badges... voir la proposition validée) : le sélecteur
-# disparaît entièrement plutôt que de rester affiché grisé/inutilisable. Défaut = "Saison
-# régulière" (PAS l'option combinée) : on ne déplace pas la baseline du dashboard sans raison,
-# tout ce qui a été validé visuellement jusqu'ici (contraste des badges, z-order, trajectoire)
-# l'a été sur données saison régulière.
+# disparaît entièrement plutôt que de rester affiché grisé/inutilisable. Défaut = "Saison +
+# Playoffs (agrégé)" (changé sur demande explicite -- l'ordre du dict ET index=0 ci-dessous
+# pilotent ensemble ce défaut, les deux doivent rester synchronisés si l'ordre change encore).
+# Même dict et même défaut dupliqués dans pages/1_Radar_de_comparaison.py (voir sa docstring) --
+# à resynchroniser à la main si cet ordre change à nouveau. Le futur classement joueurs
+# (pages/2_Classement_joueurs.py) doit repartir de ce même ordre/défaut dès sa création. Le
+# classement équipe plus bas N'EST PAS concerné : il reste volontairement figé sur "regular" en
+# dur, indépendamment de ce sélecteur (comportement voulu, ne pas transposer ce changement là-bas).
 STATS_PERIOD_OPTIONS = {
-    "Saison régulière": "regular",
     "Saison + Playoffs (agrégé)": "regular_playoffs",
+    "Saison régulière": "regular",
     "Playoffs uniquement": "playoffs",
 }
 if not is_all_seasons:
