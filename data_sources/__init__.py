@@ -75,7 +75,7 @@ NBA = SportConfig(
 
 # --- Sports à venir (aucune implémentation, juste affichés "bientôt") ----
 RUGBY = SportConfig(key="rugby", label="Rugby", available=False)
-FOOTBALL = SportConfig(key="football", label="Football (soccer)", available=False)
+FOOTBALL = SportConfig(key="football", label="Football", available=False)
 MMA = SportConfig(key="mma", label="MMA", available=False)
 TENNIS = SportConfig(key="tennis", label="Tennis", available=False)
 
