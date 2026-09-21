@@ -335,9 +335,13 @@ size_key = st.sidebar.selectbox(
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filtres")
+# key= sur ces deux curseurs (pas seulement pour la persistance habituelle d'un widget) : le
+# classement joueurs (pages/2_Classement_joueurs.py) les relit tels quels via st.session_state
+# plutôt que de les dupliquer (proposition validée) -- "min_minutes"/"min_games" doivent donc
+# rester stables si jamais renommés ici.
 min_minutes = st.sidebar.slider(
     "Minutes par match minimum (filtrer le bruit \"garbage time\")",
-    min_value=0.0, max_value=40.0, value=8.0, step=1.0,
+    min_value=0.0, max_value=40.0, value=8.0, step=1.0, key="min_minutes",
 )
 # Seuil interne mentionné dans le help ci-dessous : 15 matchs en saison régulière
 # (MIN_GAMES_FOR_FIT), mais 4 en playoffs (MIN_GAMES_FOR_FIT_PLAYOFFS, voir son commentaire dans
@@ -346,7 +350,7 @@ min_minutes = st.sidebar.slider(
 _internal_threshold_txt = "4 matchs en playoffs" if stats_period == "playoffs" else "15 matchs en saison régulière"
 min_games = st.sidebar.slider(
     "Nombre de matchs joués minimum",
-    min_value=0, max_value=82, value=0, step=1,
+    min_value=0, max_value=82, value=0, step=1, key="min_games",
     help=(
         "Filtre uniquement l'affichage (graph + tableau). Le modèle de salaire attendu a son "
         f"propre seuil interne ({_internal_threshold_txt}, voir data_sources/nba.py), indépendant "
