@@ -46,13 +46,15 @@ class SportConfig:
     award_icons: Optional[dict] = None
     award_labels: Optional[dict] = None
     # Radar de comparaison de joueurs (voir pages/1_Radar_de_comparaison.py) : radar_axes
-    # décrit les axes affichés (voir nba.RADAR_AXES pour le format), compute_radar_scores(df)
-    # ajoute les colonnes radar_<key>_z/_score, radar_caveats est une liste de textes
-    # d'avertissement à afficher sous le graph. Les 3 optionnels ensemble (None/[] par défaut
-    # pour un sport qui n'a pas encore cette fonctionnalité) -- la page radar doit gérer leur
-    # absence sans planter (même principe que award_badges_fn ci-dessus).
+    # décrit les axes affichés (voir nba.RADAR_AXES pour le format), compute_radar_scores(df,
+    # period="regular"/"playoffs") ajoute les colonnes radar_<key>_z/_score/_percentile (period
+    # sélectionne le seuil "échantillon court" utilisé comme référence, différent en playoffs --
+    # voir sa docstring), radar_caveats est une liste de textes d'avertissement à afficher sous
+    # le graph. Les 3 optionnels ensemble (None/[] par défaut pour un sport qui n'a pas encore
+    # cette fonctionnalité) -- la page radar doit gérer leur absence sans planter (même principe
+    # que award_badges_fn ci-dessus).
     radar_axes: Optional[list] = None
-    compute_radar_scores: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None
+    compute_radar_scores: Optional[Callable[..., pd.DataFrame]] = None
     radar_caveats: Optional[list] = None
 
 

@@ -129,7 +129,11 @@ if df.empty:
     st.warning(f"Aucune donnée disponible pour {season}.")
     st.stop()
 
-df = sport.compute_radar_scores(df)
+# period=stats_period : la population de référence du z-score/percentile (voir docstring de
+# nba.compute_radar_scores) doit utiliser un seuil "échantillon court" adapté à la période --
+# 15 matchs est structurellement intenable en playoffs (même correction que le badge du scatter
+# principal, voir Dashboard.py/PLAYOFF_LOW_SAMPLE_THRESHOLD_CAVEAT).
+df = sport.compute_radar_scores(df, period=stats_period)
 
 # Un joueur sans aucun match sur la période (ex: n'a pas fait les playoffs) aurait un radar
 # entièrement vide — exclu de la liste plutôt que proposé pour un résultat vide/trompeur.
@@ -317,6 +321,18 @@ st.plotly_chart(fig, width="stretch")
 
 for caveat in (sport.radar_caveats or []):
     st.caption(caveat)
+
+# Même caveat que PLAYOFF_LOW_SAMPLE_THRESHOLD_CAVEAT dans Dashboard.py (dupliqué, pas dans
+# sport.radar_caveats car ce n'est pas propre à un axe -- ça concerne la population de référence
+# du z-score/percentile dans son ensemble, voir compute_radar_scores(..., period=)) : visible
+# uniquement en playoffs, même principe que les autres caveats conditionnels de l'app.
+if stats_period == "playoffs":
+    st.caption(
+        " ℹ️ Population de référence (poste + saison) construite avec un seuil de 4 matchs "
+        "minimum en playoffs (contre 15 en saison régulière) — 15 serait structurellement "
+        "intenable ici (le maximum réellement jouable en playoffs tourne autour de 22-23 "
+        "matchs), voir Dashboard.py pour la mesure d'impact complète."
+    )
 
 if recap_rows:
     with st.expander(f"📋 Valeurs brutes par axe (stat/match  ·  {display_mode.lower()})", expanded=True):

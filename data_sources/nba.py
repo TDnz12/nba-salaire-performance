@@ -1313,10 +1313,9 @@ def _percentile_by_position(
     return result
 
 
-def compute_radar_scores(df: pd.DataFrame, min_games: int = MIN_GAMES_FOR_FIT) -> pd.DataFrame:
+def compute_radar_scores(df: pd.DataFrame, period: PlayoffMode = "regular") -> pd.DataFrame:
     """Ajoute, pour chaque axe de RADAR_AXES, sur la même référence (population de `df` ayant
-    joué au moins `min_games` matchs — réutilise MIN_GAMES_FOR_FIT, même seuil que le modèle
-    salaire — groupée par poste) :
+    joué au moins un seuil minimum de matchs, groupée par poste) :
       - `radar_<key>_z` : z-score (_zscore_by_position, même fonction que le modèle de valeur
         ajoutée) et sa mise à l'échelle [0, 100] pour affichage radar (`radar_<key>_score`, clip
         à ±3 écarts-types puis rescale linéaire) — mode "Indice" de la page radar.
@@ -1324,10 +1323,20 @@ def compute_radar_scores(df: pd.DataFrame, min_games: int = MIN_GAMES_FOR_FIT) -
     Les deux sont ensuite appliqués à TOUT `df`, y compris les échantillons courts sous ce seuil
     (comme le scatter principal, affichés mais pas dans la référence).
 
+    `period` sélectionne le seuil, MÊME PRINCIPE que _recompute_derived_stat_columns/le badge
+    "échantillon court" du scatter principal : MIN_GAMES_FOR_FIT (15) en "regular",
+    MIN_GAMES_FOR_FIT_PLAYOFFS (4) en "playoffs" -- 15 y est structurellement intenable (voir la
+    docstring de MIN_GAMES_FOR_FIT_PLAYOFFS), et sans cette distinction la population de
+    référence du radar en mode playoffs serait quasi vide comme l'était le badge avant sa
+    correction. Le paramètre s'appelle `period` (pas `min_games` en direct) pour que
+    pages/1_Radar_de_comparaison.py n'ait pas besoin d'importer les constantes de seuil -- il
+    passe déjà `stats_period` ("regular"/"playoffs"), cohérent avec le reste de l'app.
+
     Un axe avec `invert=True` (voir RADAR_AXES -- actuellement "Sécurité de balle") calcule son
     z-score/percentile sur l'OPPOSÉ de `stat_col` (colonne temporaire, supprimée avant de
     retourner) : `stat_col` lui-même n'est jamais modifié, il reste la vraie valeur/match pour
     l'affichage (tooltip, tableau récap) -- seul le calcul de position dans le radar est inversé."""
+    min_games = MIN_GAMES_FOR_FIT_PLAYOFFS if period == "playoffs" else MIN_GAMES_FOR_FIT
     result = df.copy()
 
     if "position_group" not in result.columns:
