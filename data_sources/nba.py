@@ -106,6 +106,17 @@ ROOKIE_SCALE_MAX_YEARS = 4
 # visuellement sans les cacher).
 MIN_GAMES_FOR_FIT = 15
 
+# Seuil équivalent pour period="playoffs" (voir _recompute_derived_stat_columns) -- 15 est
+# intenable en playoffs : le maximum RÉEL jouable sur une saison tourne autour de 22-23 matchs
+# (4 tours best-of-7, sweep systématique de l'adversaire à chaque tour requis pour approcher le
+# maximum théorique de 28), et la plupart des équipes sont éliminées bien avant. Mesuré sur
+# données réelles (2024-25) avant correction : ~84% de TOUS les joueurs ayant fait les playoffs
+# étaient marqués low_sample_size avec le seuil de 15, y compris 33 à 53% du roster de l'équipe
+# CHAMPIONNE selon la saison (qui joue pourtant le maximum de matchs possible). 4 matchs = le
+# minimum pour compléter/sweeper une série (format best-of-7) -- seuil bas mais structurellement
+# significatif, contrairement à 15 qui ne l'est simplement pas dans ce contexte.
+MIN_GAMES_FOR_FIT_PLAYOFFS = 4
+
 # Nombre de saisons (la saison affichée + les précédentes) utilisées pour calculer la
 # métrique "Fiabilité" = matchs joués / matchs possibles de l'équipe sur cette fenêtre. Voir
 # _fetch_reliability. nba_api couvre l'historique bien avant 2010, donc cette fenêtre peut
@@ -285,7 +296,7 @@ CHAMPIONS_BY_SEASON: dict[str, str] = {
 # calcul modifiée). Un cache disque écrit sous une version différente est
 # automatiquement ignoré et recalculé (voir base.read_cache/write_cache) —
 # évite qu'un ancien cache reste silencieusement incomplet après un déploiement.
-PROCESSED_SCHEMA_VERSION = 16  # v16: ajout médiane/Q1/Q3 des résidus du modèle (musd + pct_cap), voir base.FittedValueModel.residuals
+PROCESSED_SCHEMA_VERSION = 17  # v17: seuil "échantillon court" (low_sample_size) adapté en playoffs (4 matchs au lieu de 15) -- change la colonne pour period="playoffs" uniquement, mais le cache est invalidé pour toutes les périodes par simplicité (voir MIN_GAMES_FOR_FIT_PLAYOFFS)
 # v15: ajout value_added_residual_std_pct_cap (bande d'incertitude de la trajectoire par joueur, Dashboard.py)
 # v14: extension historique 1996-97→2009-10 (dataset legacy) + colonnes salary_pct_cap/expected_salary_pct_cap/value_added_pct_cap
 # v13: ajout value_added_residual_std_musd + fix base.read_cache qui laissait fuiter _schema_version (collision de merge possible sur un cache déjà écrit)
@@ -956,17 +967,24 @@ PLAYOFF_PERIOD_STAT_COLS = [
 ]
 
 
-def _recompute_derived_stat_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _recompute_derived_stat_columns(df: pd.DataFrame, min_games: int = MIN_GAMES_FOR_FIT) -> pd.DataFrame:
     """(Ré)calcule impact_hors_scoring et low_sample_size à partir des colonnes de stats
     actuellement présentes dans `df` — appelé après avoir établi les stats de la période voulue
-    (régulière, combinée, ou playoffs seules), pour que ces deux colonnes dérivées restent
-    cohérentes avec la période effectivement affichée plutôt que de garder des valeurs issues
-    d'une période précédente."""
+    (régulière ou playoffs seules), pour que ces deux colonnes dérivées restent cohérentes avec
+    la période effectivement affichée plutôt que de garder des valeurs issues d'une période
+    précédente.
+
+    `min_games` : seuil du badge "échantillon court" -- MIN_GAMES_FOR_FIT (15) par défaut, mais
+    l'appelant doit passer MIN_GAMES_FOR_FIT_PLAYOFFS (4) pour period="playoffs" (voir sa
+    docstring pour pourquoi 15 y est structurellement intenable). Ce paramètre ne change QUE le
+    badge d'affichage, jamais le fit_mask du modèle salaire~performance : en mode "playoffs", le
+    modèle reste toujours celui ajusté sur la saison régulière (reg_fit_mask, seuil 15),
+    réutilisé tel quel -- voir get_player_stats."""
     df = df.copy()
     df["impact_hors_scoring"] = (
         df["rebounds_per_game"] + df["blocks_per_game"] + df["assists_per_game"] + df["steals_per_game"]
     )
-    df["low_sample_size"] = df["games_played"] < MIN_GAMES_FOR_FIT
+    df["low_sample_size"] = df["games_played"] < min_games
     return df
 
 
@@ -1110,7 +1128,10 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
     else:  # "playoffs"
         po_stats_raw = _fetch_nba_api_stats_playoffs(season, force_refresh=force_refresh)
         working = _substitute_playoffs_only_stats(reg_merged, po_stats_raw)
-        working = _recompute_derived_stat_columns(working)
+        # min_games=MIN_GAMES_FOR_FIT_PLAYOFFS (4, pas 15) : le badge "échantillon court" doit
+        # utiliser un seuil adapté au nombre de matchs RÉELLEMENT jouable en playoffs, voir sa
+        # docstring pour la justification complète.
+        working = _recompute_derived_stat_columns(working, min_games=MIN_GAMES_FOR_FIT_PLAYOFFS)
         # PAS de nouveau z-score : réutilise la moyenne/écart-type de poste de la SAISON
         # RÉGULIÈRE (échantillon de fit reg_fit_mask), appliquée aux valeurs playoffs — voir
         # _zscore_by_position et le diagnostic de faisabilité (échantillon playoffs seul trop

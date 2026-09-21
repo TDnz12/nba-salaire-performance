@@ -339,12 +339,17 @@ min_minutes = st.sidebar.slider(
     "Minutes par match minimum (filtrer le bruit \"garbage time\")",
     min_value=0.0, max_value=40.0, value=8.0, step=1.0,
 )
+# Seuil interne mentionné dans le help ci-dessous : 15 matchs en saison régulière
+# (MIN_GAMES_FOR_FIT), mais 4 en playoffs (MIN_GAMES_FOR_FIT_PLAYOFFS, voir son commentaire dans
+# data_sources/nba.py pour pourquoi 15 y est intenable) -- texte dynamique selon stats_period
+# (déjà connu à ce stade du script) plutôt qu'un nombre en dur qui serait faux la moitié du temps.
+_internal_threshold_txt = "4 matchs en playoffs" if stats_period == "playoffs" else "15 matchs en saison régulière"
 min_games = st.sidebar.slider(
     "Nombre de matchs joués minimum",
     min_value=0, max_value=82, value=0, step=1,
     help=(
         "Filtre uniquement l'affichage (graph + tableau). Le modèle de salaire attendu a son "
-        "propre seuil interne (15 matchs, voir data_sources/nba.MIN_GAMES_FOR_FIT), indépendant "
+        f"propre seuil interne ({_internal_threshold_txt}, voir data_sources/nba.py), indépendant "
         "de ce curseur — les joueurs sous ce seuil sont visibles par défaut (badge ⚠️ losange "
         "creux dans le graph), à toi de décider si tu veux les masquer."
     ),
@@ -476,8 +481,8 @@ POSITION_BIAS_CAVEAT = (
 # années 90-2000 (ex. -0.7 en 1996-97), jusqu'à -5.5 possessions/48min en 2023-24. Un volume par
 # match plus faible en playoffs (moins de possessions) ne signifie donc pas nécessairement une
 # baisse de niveau individuel — s'ajoute une défense plus dure/préparée et des rotations
-# resserrées. Visible uniquement quand une des 2 options playoffs est sélectionnée (voir
-# stats_period plus haut), même style que SCORER_BIAS_CAVEAT.
+# resserrées. Visible uniquement en mode playoffs (voir stats_period plus haut), même style que
+# SCORER_BIAS_CAVEAT.
 PLAYOFF_PACE_CAVEAT = (
     " ⚠️ Écart de rythme de jeu saison régulière / playoffs : les playoffs se jouent à un rythme "
     "plus lent (jusqu'à -5.5 possessions/48min en 2023-24, écart quasi neutre dans les années "
@@ -485,6 +490,21 @@ PLAYOFF_PACE_CAVEAT = (
     "playoffs ne traduit donc pas forcément une baisse de niveau individuel, la défense plus "
     "dure et les rotations resserrées jouent aussi. Pas corrigé dans le calcul, à garder en tête "
     "en comparant les deux périodes."
+)
+
+# Mention méthodologique du seuil "échantillon court" différent en playoffs (voir
+# nba.MIN_GAMES_FOR_FIT_PLAYOFFS/MIN_GAMES_FOR_FIT pour la justification complète et la mesure
+# d'impact avant/après correction -- valeurs reprises en dur ci-dessous plutôt qu'importées,
+# Dashboard.py ne connaît volontairement que data_sources.SPORTS, pas les modules de sport
+# directement, même principe que les autres caveats de ce fichier) — même style que
+# PLAYOFF_PACE_CAVEAT ci-dessus, visible uniquement en mode playoffs.
+PLAYOFF_LOW_SAMPLE_THRESHOLD_CAVEAT = (
+    " ⚠️ Seuil \"échantillon court\" différent en playoffs : un joueur y est marqué à partir de "
+    "moins de 4 matchs (contre 15 en saison régulière) — le nombre maximum de matchs réellement "
+    "jouable en playoffs (~22-23 dans la pratique, 4 tours best-of-7) est trop faible pour garder "
+    "le même seuil : appliqué tel quel, il marquait ~84% de tous les joueurs de playoffs, y "
+    "compris un tiers à la moitié du roster de l'équipe championne. 4 matchs = le minimum pour "
+    "compléter/sweeper une série."
 )
 
 missing_salary = df["salary"].isna().all() if "salary" in df.columns else True
@@ -574,7 +594,7 @@ if "value_added_r2" in df.columns:
                     "pour le critère de sélection). Modèle simple à but exploratoire, pas une évaluation "
                     "contractuelle réelle." + margin_txt + distribution_txt
                     + SCORER_BIAS_CAVEAT + POSITION_BIAS_CAVEAT
-                    + (PLAYOFF_PACE_CAVEAT if stats_period != "regular" else "")
+                    + (PLAYOFF_PACE_CAVEAT + PLAYOFF_LOW_SAMPLE_THRESHOLD_CAVEAT if stats_period != "regular" else "")
                 )
         else:
             # Inconditionnel (contrairement à la légende ci-dessus) : un modèle non ajusté est un
