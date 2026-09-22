@@ -23,10 +23,9 @@ RATIN21_DATASET_START_YEAR (2010-11) :
 nba_api n'expose pas les salaires ni le PER "officiel" Basketball-Reference : on les
 récupère donc via ces datasets et on les fusionne sur le nom du joueur.
 
-Les montants en $ sont aussi normalisés en % du plafond salarial officiel de la saison
-(NBA_SALARY_CAP_BY_SEASON) : salary_pct_cap / expected_salary_pct_cap /
-value_added_pct_cap, pour rester comparables entre des saisons où le plafond a été
-multiplié par ~6 (24M$ en 1996-97 à 155M$ en 2025-26).
+Le salaire en $ est aussi normalisé en % du plafond salarial officiel de la saison
+(NBA_SALARY_CAP_BY_SEASON) : salary_pct_cap, pour rester comparable entre des saisons où
+le plafond a été multiplié par ~6 (24M$ en 1996-97 à 155M$ en 2025-26).
 
 Tout est mis en cache dans /data_cache pour ne pas re-scraper/re-télécharger
 à chaque lancement de l'app (voir base.py: RAW_ROOT / PROCESSED_ROOT). Pour pré-remplir
@@ -38,6 +37,7 @@ Point d'entrée public : get_player_stats(season) -> DataFrame normalisé.
 
 from __future__ import annotations
 
+import functools
 import glob
 import logging
 import time
@@ -47,74 +47,31 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from .base import (
-    Metric, RAW_ROOT, PROCESSED_ROOT, apply_value_model, compute_value_added, fit_value_model,
-    normalize_name, read_cache, write_cache,
-)
+from .base import Metric, RAW_ROOT, PROCESSED_ROOT, normalize_name, read_cache, write_cache
 
-# Variables explicatives du modèle salaire ~ performance (voir base.compute_value_added).
+# Seuil en dessous duquel une moyenne par match (n'importe laquelle) est jugée peu fiable pour
+# représenter un joueur sur la saison affichée -- un tout petit échantillon de matchs (ex: 4-11)
+# peut être gonflé par un simple coup de chaud plutôt que refléter une vraie performance de
+# saison. Pas un filtre qui cache le joueur : voir la colonne `low_sample_size`
+# (`_recompute_derived_stat_columns`), utilisée par Dashboard.py/le radar pour le distinguer
+# visuellement (badge, marqueur différent) sans le cacher, et comme référence pour le radar de
+# comparaison (`compute_radar_scores`).
 #
-# Historique (pour comprendre pourquoi ce n'est ni PIE seul, ni PIE + points/match) :
-# 1. PIE + points/match (première version) : le modèle ajusté sur TOUS les joueurs, y compris
-#    ceux sous barème rookie (salaire fixé par la convention collective, pas négocié au
-#    marché), faussait la ligne de valeur de marché — corrigé en restreignant le fit aux
-#    vétérans (voir ROOKIE_SCALE_MAX_YEARS / fit_mask dans get_player_stats).
-# 2. Une fois ce biais corrigé, un second problème est apparu : PIE et points/match sont
-#    corrélés à ~0.74 chez les vétérans (logique, la formule du PIE inclut déjà le scoring).
-#    Cette colinéarité rendait le coefficient de PIE NÉGATIF (-22.9M$/unité) — un artefact
-#    statistique, pas une vraie relation. Testé avec une régression Ridge (alpha choisi par
-#    validation croisée) : le signe restait négatif (CV optimise l'erreur de prédiction, pas
-#    l'interprétabilité des coefficients) et 753→648 violations de monotonie subsistaient sur
-#    27895 paires de vétérans où un joueur domine strictement un autre sur PIE et points/match
-#    mais recevait pourtant un salaire attendu inférieur ou égal.
-# 3. Remplacer points_per_game par un composite "impact hors scoring" (rebonds + contres +
-#    passes + interceptions par match) règle ce problème de cohérence : coefficients PIE et
-#    impact_hors_scoring tous deux POSITIFS, et seulement 1 violation de monotonie sur 29138
-#    paires (vs 753 avec PIE+PTS). Coût : R² plus bas (0.31 vs 0.50) — le modèle explique moins
-#    bien les salaires réels, car il ignore volontairement le scoring (le facteur le plus
-#    corrélé aux salaires NBA en pratique), au profit d'un classement "valeur ajoutée" cohérent,
-#    ce qui est l'objectif même de cette fonctionnalité.
-# 4. Diagnostic du 11/09 : impact_hors_scoring favorise mécaniquement les intérieurs (rebonds
-#    plus faciles à cumuler pour les gros gabarits) — confirmé sur 2 saisons : impact_hors_scoring
-#    moyen ~8.7 chez les intérieurs vs ~5.9 chez extérieurs/ailiers, et une régression de
-#    value_added sur des dummies de poste (échantillon de fit) donnait un coefficient
-#    "Intérieur" de +6.7 à +7.5M$, p<0.001 — un biais de poste non capté par le modèle, non le
-#    fruit du hasard. Correction : impact_hors_scoring est remplacé, UNIQUEMENT comme feature du
-#    modèle, par son z-score calculé À L'INTÉRIEUR de chaque groupe de poste (voir
-#    impact_hors_scoring_zscore_poste dans get_player_stats) — un intérieur n'est plus comparé
-#    en absolu aux extérieurs/ailiers sur cette variable, seulement à ses pairs au même poste.
-#    La colonne impact_hors_scoring brute reste inchangée pour l'affichage (axes, infobulle,
-#    catalogue de métriques) : seule l'entrée du modèle change.
-VALUE_ADDED_PERFORMANCE_COLS = ["pie", "impact_hors_scoring_zscore_poste"]
-
-# Un joueur est considéré "sous barème rookie" pour ses ROOKIE_SCALE_MAX_YEARS premières
-# saisons en NBA (ancienneté calculée via _fetch_nba_api_experience, qui fonctionne aussi
-# pour les joueurs non-draftés). Approximation : le vrai "rookie scale" CBA ne s'applique
-# qu'aux picks de 1er tour, mais les 2e tour / non-draftés signent aussi des contrats
-# minimum/two-way non négociés au marché sur cette période — les exclure du fit a donc le
-# même objectif (ne garder que des salaires reflétant une vraie valeur de marché).
-ROOKIE_SCALE_MAX_YEARS = 4
-
-# Nombre minimum de matchs joués pour qu'un joueur compte dans l'ajustement du modèle
-# salaire ~ performance. Sans ce filtre, un joueur avec très peu de matchs (ex: 4-11) peut
-# avoir une moyenne par match gonflée par un simple coup de chaud plutôt qu'une vraie
-# performance de saison, et fausser les coefficients pour tout le monde — même problème que
-# l'exclusion des rookies (fit_mask), juste sur l'axe "nombre de matchs" plutôt que
-# "ancienneté". Les joueurs sous ce seuil reçoivent quand même une prédiction (comme les
-# rookies) ; seul l'AJUSTEMENT du modèle les exclut. Contrairement au fit, l'affichage ne les
-# masque pas : voir la colonne `low_sample_size` (utilisée par Dashboard.py pour les distinguer
-# visuellement sans les cacher).
+# NOTE : le nom "MIN_GAMES_FOR_FIT" date d'une fonctionnalité de salaire attendu/valeur ajoutée
+# retirée du dashboard (régression salaire ~ performance jugée peu fiable sur les cas extrêmes,
+# voir METHODOLOGY.md) -- gardé tel quel pour ne pas renommer une constante encore utilisée
+# ailleurs (Dashboard.py, radar) sans nécessité, mais ne désigne plus aucun "fit" aujourd'hui.
 MIN_GAMES_FOR_FIT = 15
 
-# Seuil équivalent pour period="playoffs" (voir _recompute_derived_stat_columns) -- 15 est
-# intenable en playoffs : le maximum RÉEL jouable sur une saison tourne autour de 22-23 matchs
-# (4 tours best-of-7, sweep systématique de l'adversaire à chaque tour requis pour approcher le
-# maximum théorique de 28), et la plupart des équipes sont éliminées bien avant. Mesuré sur
-# données réelles (2024-25) avant correction : ~84% de TOUS les joueurs ayant fait les playoffs
-# étaient marqués low_sample_size avec le seuil de 15, y compris 33 à 53% du roster de l'équipe
-# CHAMPIONNE selon la saison (qui joue pourtant le maximum de matchs possible). 4 matchs = le
-# minimum pour compléter/sweeper une série (format best-of-7) -- seuil bas mais structurellement
-# significatif, contrairement à 15 qui ne l'est simplement pas dans ce contexte.
+# Seuil équivalent pour period="playoffs" -- 15 est intenable en playoffs : le maximum RÉEL
+# jouable sur une saison tourne autour de 22-23 matchs (4 tours best-of-7, sweep systématique de
+# l'adversaire à chaque tour requis pour approcher le maximum théorique de 28), et la plupart des
+# équipes sont éliminées bien avant. Mesuré sur données réelles (2024-25) avant correction : ~84%
+# de TOUS les joueurs ayant fait les playoffs étaient marqués low_sample_size avec le seuil de
+# 15, y compris 33 à 53% du roster de l'équipe CHAMPIONNE selon la saison (qui joue pourtant le
+# maximum de matchs possible). 4 matchs = le minimum pour compléter/sweeper une série (format
+# best-of-7) -- seuil bas mais structurellement significatif, contrairement à 15 qui ne l'est
+# simplement pas dans ce contexte.
 MIN_GAMES_FOR_FIT_PLAYOFFS = 4
 
 # Nombre de saisons (la saison affichée + les précédentes) utilisées pour calculer la
@@ -127,7 +84,7 @@ EARLIEST_SUPPORTED_SEASON_START_YEAR = 1996  # nba_api est fiable à partir de 1
 # Nombre de tentatives (avec backoff court) pour un appel réseau nba_api jugé assez critique
 # pour justifier des retries — voir _call_with_retries. N'est pas appliqué systématiquement à
 # tous les appels du fichier : seulement là où un échec casse une fonctionnalité entière plutôt
-# qu'une colonne annexe (ex: _fetch_player_positions, dont dépend tout le modèle value_added).
+# qu'une colonne annexe (ex: _fetch_player_positions, dont dépend le radar de comparaison).
 NETWORK_RETRY_ATTEMPTS = 3
 NETWORK_RETRY_BACKOFF_SECONDS = 1.5
 
@@ -291,21 +248,47 @@ CHAMPIONS_BY_SEASON: dict[str, str] = {
     "2024-25": "OKC", "2025-26": "NYK",
 }
 
+
+@functools.lru_cache(maxsize=1)
+def get_teams_static() -> list[dict]:
+    """Liste statique des 30 franchises NBA actuelles -- nba_api.stats.static.teams, données
+    embarquées dans le package (AUCUN appel réseau, contrairement au reste de ce module).
+    Chaque entrée : id/abbreviation/full_name/nickname/city. Sert à construire les URLs de
+    logos du CDN public NBA (pages/2_Rosters.py) --
+    https://cdn.nba.com/logos/nba/{id}/global/L/logo.svg -- et la grille d'équipes.
+
+    Abréviations D'AUJOURD'HUI uniquement : une franchise ayant changé de nom/ville depuis 1996
+    (ex: Seattle SuperSonics -> Oklahoma City Thunder, Vancouver -> Memphis Grizzlies, New
+    Jersey -> Brooklyn Nets) n'a qu'UNE entrée ici, sous son identité actuelle -- alors que la
+    colonne "team" de get_player_stats reste l'abréviation HISTORIQUE réellement en usage cette
+    saison-là (nba_api normalise season par season, voir _fetch_nba_api_stats). Une saison
+    ancienne + une franchise relocalisée depuis peut donc ne matcher aucun joueur (roster vide) :
+    limite connue, acceptée pour la v1 de pages/2_Rosters.py plutôt que reconstruire une table de
+    correspondance historique par saison pour un cas marginal.
+
+    lru_cache (pas d'écriture disque via base.write_cache comme le reste du module) : purement
+    statique et déjà instantané (aucun appel réseau), un cache disque n'apporterait rien."""
+    from nba_api.stats.static import teams
+
+    return teams.get_teams()
+
+
 # À incrémenter chaque fois que la forme du DataFrame retourné par
 # get_player_stats() change (colonne ajoutée/renommée/supprimée, logique de
 # calcul modifiée). Un cache disque écrit sous une version différente est
 # automatiquement ignoré et recalculé (voir base.read_cache/write_cache) —
 # évite qu'un ancien cache reste silencieusement incomplet après un déploiement.
-PROCESSED_SCHEMA_VERSION = 17  # v17: seuil "échantillon court" (low_sample_size) adapté en playoffs (4 matchs au lieu de 15) -- change la colonne pour period="playoffs" uniquement, mais le cache est invalidé pour toutes les périodes par simplicité (voir MIN_GAMES_FOR_FIT_PLAYOFFS)
-# v15: ajout value_added_residual_std_pct_cap (bande d'incertitude de la trajectoire par joueur, Dashboard.py)
-# v14: extension historique 1996-97→2009-10 (dataset legacy) + colonnes salary_pct_cap/expected_salary_pct_cap/value_added_pct_cap
-# v13: ajout value_added_residual_std_musd + fix base.read_cache qui laissait fuiter _schema_version (collision de merge possible sur un cache déjà écrit)
+PROCESSED_SCHEMA_VERSION = 19  # v19: retrait complet de la fonctionnalité salaire attendu/valeur ajoutée (expected_salary*, value_added* et toutes leurs variantes, is_rookie_scale, years_experience, impact_hors_scoring_zscore_poste) -- voir METHODOLOGY.md pour le pourquoi
+# v18: plafond CBA indépendant sur expected_salary/value_added -- retiré en v19, mention gardée pour l'historique
+# v15: ajout value_added_residual_std_pct_cap (bande d'incertitude de la trajectoire par joueur, Dashboard.py) -- colonne retirée en v19
+# v14: extension historique 1996-97→2009-10 (dataset legacy) + colonnes salary_pct_cap/expected_salary_pct_cap/value_added_pct_cap -- les deux dernières retirées en v19
+# v13: ajout value_added_residual_std_musd + fix base.read_cache qui laissait fuiter _schema_version (collision de merge possible sur un cache déjà écrit) -- colonne retirée en v19
 
 # Même principe que PROCESSED_SCHEMA_VERSION, mais pour le cache brut intermédiaire de
-# _fetch_nba_api_stats (avant fusion salaire/ancienneté). À incrémenter si les colonnes
-# qu'elle renvoie changent (ex: ajout de player_id en v2, nécessaire pour joindre
-# _fetch_nba_api_experience) — sinon un vieux cache brut resterait incomplet indéfiniment,
-# même après un bump de PROCESSED_SCHEMA_VERSION, puisque c'est un cache distinct.
+# _fetch_nba_api_stats (avant fusion salaire). À incrémenter si les colonnes qu'elle renvoie
+# changent (ex: ajout de player_id en v2, nécessaire pour joindre positions/fiabilité) — sinon
+# un vieux cache brut resterait incomplet indéfiniment, même après un bump de
+# PROCESSED_SCHEMA_VERSION, puisque c'est un cache distinct.
 NBA_API_STATS_SCHEMA_VERSION = 2  # v2: ajout player_id
 
 # Cache brut pour _fetch_nba_api_stats_playoffs (season_type_all_star="Playoffs") -- même schéma
@@ -313,15 +296,12 @@ NBA_API_STATS_SCHEMA_VERSION = 2  # v2: ajout player_id
 # différent, voir cache_suffix).
 NBA_API_STATS_PLAYOFFS_SCHEMA_VERSION = 1
 
-# Idem pour _fetch_nba_api_experience : la toute première version utilisait
-# is_only_current_season=1, qui ignore le paramètre `season` et ne renvoie que le roster du
-# jour de l'appel — quasiment aucun recouvrement avec une saison passée. v2 corrige ça avec
-# is_only_current_season=0 (liste all-time, fiable pour n'importe quelle saison).
-NBA_API_EXPERIENCE_SCHEMA_VERSION = 2
-
 # Caches bruts pour _fetch_team_games_possible et _fetch_reliability (voir plus bas).
 NBA_API_TEAM_GAMES_SCHEMA_VERSION = 1
 NBA_API_RELIABILITY_SCHEMA_VERSION = 3  # v3: ne met plus en cache un résultat partiel (saison(s) manquante(s) suite à une erreur réseau)
+
+# Cache brut pour _fetch_team_stats (bandeau classement des équipes de Dashboard.py).
+NBA_API_TEAM_STATS_SCHEMA_VERSION = 1
 
 # Cache brut pour _fetch_player_positions (voir plus bas).
 NBA_API_POSITIONS_SCHEMA_VERSION = 1
@@ -462,11 +442,7 @@ METRICS: dict[str, Metric] = {
     "plus_minus": Metric("plus_minus", "+/- par match", ",.1f", "Efficacité"),
     "impact_hors_scoring": Metric("impact_hors_scoring", "Impact hors scoring (reb+ctr+pd+int par match)", ",.1f", "Efficacité"),
     "salary_musd": Metric("salary_musd", "Salaire (M$)", ",.2f", "Salaire"),
-    "expected_salary_musd": Metric("expected_salary_musd", "Salaire attendu par le modèle (M$)", ",.2f", "Salaire"),
-    "value_added_musd": Metric("value_added_musd", "Valeur ajoutée (M$) : attendu − réel", ",.2f", "Valeur"),
     "salary_pct_cap": Metric("salary_pct_cap", "Salaire (% du plafond)", ".1%", "Salaire"),
-    "expected_salary_pct_cap": Metric("expected_salary_pct_cap", "Salaire attendu (% du plafond)", ".1%", "Salaire"),
-    "value_added_pct_cap": Metric("value_added_pct_cap", "Valeur ajoutée (% du plafond) : attendu − réel", ".1%", "Valeur"),
     "reliability_pct": Metric(
         "reliability_pct", "Fiabilité (% matchs joués, 3 dernières saisons)", ".1%", "Fiabilité"
     ),
@@ -476,6 +452,22 @@ METRICS: dict[str, Metric] = {
 # toujours disponible) comme métrique d'efficacité/valeur plutôt que le PER historique
 # de Basketball-Reference. _resolve_kaggle_columns() garde un alias "per" au cas où une
 # future version du dataset l'ajouterait ; la colonne resterait alors NaN sans casser rien.
+
+# Catalogue dédié au bandeau "classement des équipes" (Dashboard.py) -- volontairement
+# séparé de METRICS ci-dessus : uniquement des stats d'ÉQUIPE réelles (_fetch_team_stats)
+# ou agrégées par équipe (masse salariale), pas le catalogue joueurs entier.
+TEAM_RANKING_METRICS: dict[str, Metric] = {
+    "pts_per_game": Metric("pts_per_game", "Points par match", ",.1f", "Volume"),
+    "reb_per_game": Metric("reb_per_game", "Rebonds par match", ",.1f", "Volume"),
+    "ast_per_game": Metric("ast_per_game", "Passes décisives par match", ",.1f", "Volume"),
+    "stl_per_game": Metric("stl_per_game", "Interceptions par match", ",.1f", "Volume"),
+    "blk_per_game": Metric("blk_per_game", "Contres par match", ",.1f", "Volume"),
+    "fg_pct": Metric("fg_pct", "% Réussite au tir (FG%)", ".1%", "Efficacité"),
+    "fg3_pct": Metric("fg3_pct", "% Réussite à 3 points", ".1%", "Efficacité"),
+    "ft_pct": Metric("ft_pct", "% Réussite aux lancers francs", ".1%", "Efficacité"),
+    "pie": Metric("pie", "PIE équipe (Player Impact Estimate agrégé)", ".3f", "Efficacité"),
+    "salary_total_musd": Metric("salary_total_musd", "Masse salariale totale (M$)", ",.1f", "Salaire"),
+}
 
 
 # --------------------------------------------------------------------------
@@ -557,43 +549,6 @@ def _fetch_nba_api_stats_playoffs(season: str, force_refresh: bool = False) -> p
     return _fetch_nba_api_stats(season, force_refresh=force_refresh, season_type="Playoffs", cache_suffix="_playoffs")
 
 
-def _fetch_nba_api_experience(season: str, force_refresh: bool = False) -> pd.DataFrame:
-    """Retourne, pour chaque joueur actif cette saison-là, son ancienneté en
-    NBA (saison en cours - année de première apparition dans la ligue), via
-    nba_api (endpoint CommonAllPlayers, roster de la saison). Un seul appel
-    groupé, pas un appel par joueur. Mis en cache par saison.
-
-    Fonctionne aussi bien pour les joueurs draftés que non-draftés (ex: Alex
-    Caruso), contrairement à la colonne DRAFT_YEAR de LeagueDashPlayerBioStats
-    qui vaut "Undrafted" pour ces derniers et ne permet donc pas de calculer
-    leur ancienneté. Utilisé pour exclure les joueurs en tout début de
-    carrière (barème rookie / minimum scale, pas négocié au marché) de
-    l'ajustement du modèle salaire ~ performance — voir get_player_stats."""
-    raw_cache_path = NBA_RAW_DIR / "nba_api" / f"experience_{season}.parquet"
-    cached = None if force_refresh else read_cache(raw_cache_path, schema_version=NBA_API_EXPERIENCE_SCHEMA_VERSION)
-    if cached is not None:
-        return cached
-
-    from nba_api.stats.endpoints import commonallplayers
-
-    # is_only_current_season=1 ignore en fait le paramètre `season` demandé et ne renvoie
-    # que le roster ACTUEL (au moment de l'appel), inutile pour une saison passée. On prend
-    # donc la liste complète all-time (is_only_current_season=0) où FROM_YEAR/TO_YEAR sont
-    # fiables pour n'importe quelle saison, passée ou présente.
-    roster = commonallplayers.CommonAllPlayers(is_only_current_season=0).get_data_frames()[0]
-
-    season_start_year = int(season[:4])
-    from_year = pd.to_numeric(roster["FROM_YEAR"], errors="coerce")
-    result = pd.DataFrame(
-        {
-            "player_id": roster["PERSON_ID"],
-            "years_experience": season_start_year - from_year,
-        }
-    )
-    write_cache(result, raw_cache_path, schema_version=NBA_API_EXPERIENCE_SCHEMA_VERSION)
-    return result
-
-
 def _call_with_retries(fn, description: str, attempts: int = NETWORK_RETRY_ATTEMPTS,
                         backoff_seconds: float = NETWORK_RETRY_BACKOFF_SECONDS):
     """Exécute `fn()` avec quelques tentatives et un court backoff avant d'abandonner — utile
@@ -617,9 +572,9 @@ def _call_with_retries(fn, description: str, attempts: int = NETWORK_RETRY_ATTEM
 def _fetch_player_positions(season: str, force_refresh: bool = False) -> pd.DataFrame:
     """Regroupe chaque joueur en 3 postes simples (Intérieur/Ailier/Extérieur) via le filtre
     officiel `player_position_abbreviation_nullable` de nba_api (C/F/G) — 3 appels groupés par
-    saison, pas un par joueur. Sert uniquement à neutraliser le biais de poste dans
-    impact_hors_scoring avant de l'utiliser comme feature du modèle salaire ~ performance (voir
-    VALUE_ADDED_PERFORMANCE_COLS) ; n'est pas exposé dans le catalogue METRICS ni dans l'UI.
+    saison, pas un par joueur. Utilisé par le radar de comparaison (voir compute_radar_scores)
+    pour normaliser certains axes par poste plutôt qu'en absolu ; n'est pas exposé dans le
+    catalogue METRICS ni comme colonne affichée directement dans l'UI.
 
     Un joueur au poste hybride (ex: "F-C") peut apparaître dans plusieurs des 3 requêtes selon
     la saison/l'équipe — on garde alors la première catégorie rencontrée, dans l'ordre C > F > G
@@ -689,6 +644,65 @@ def _fetch_team_games_possible(season: str, force_refresh: bool = False) -> int:
     result = pd.DataFrame({"games_possible": [games_possible]})
     write_cache(result, raw_cache_path, schema_version=NBA_API_TEAM_GAMES_SCHEMA_VERSION)
     return games_possible
+
+
+# Stats de VOLUME/TIR (measure_type "Base") + PIE équipe (measure_type "Advanced", même
+# formule que le PIE joueur mais appliquée aux totaux d'équipe -- corrélation mesurée à 0.96
+# avec le win% sur 2023-24, un vrai signal de niveau global d'équipe, pas un bricolage)
+# retenues pour le bandeau "classement des équipes" de Dashboard.py, via _fetch_team_stats.
+TEAM_STATS_MEASURE_COLS = {
+    "Base": ["PTS", "REB", "AST", "STL", "BLK", "FG_PCT", "FG3_PCT", "FT_PCT"],
+    "Advanced": ["PIE"],
+}
+
+
+def _fetch_team_stats(season: str, period: str = "regular", force_refresh: bool = False) -> pd.DataFrame:
+    """Vraies stats d'ÉQUIPE par match (nba_api, LeagueDashTeamStats -- même endpoint que
+    _fetch_team_games_possible), PAS une moyenne des joueurs actuellement affichés/filtrés
+    dans le scatter plot. `period` ("regular" ou "playoffs") pilote season_type_all_star,
+    indépendamment du mode saison régulière/playoffs du scatter plot au-dessus dans
+    Dashboard.py -- une équipe non qualifiée n'a simplement pas de ligne en mode playoffs.
+
+    LeagueDashTeamStats ne renvoie que TEAM_ID/TEAM_NAME, pas d'abréviation d'équipe
+    (contrairement à LeagueDashPlayerStats qui a TEAM_ABBREVIATION) -- et TEAM_NAME n'est pas
+    fiable pour reconstruire l'abréviation nous-mêmes sur les saisons anciennes (franchises
+    renommées/déménagées : ex. l'abréviation nba_api pour Washington ressort "WAS" pour
+    1996-97 alors que TEAM_NAME affiche encore "Washington Bullets"). Un second appel léger à
+    LeagueDashPlayerStats (déjà utilisé ailleurs, ici seulement pour la paire TEAM_ID/
+    TEAM_ABBREVIATION de cette même saison) sert de table de correspondance, garantie
+    cohérente avec la colonne "team" du reste du pipeline (_fetch_nba_api_stats)."""
+    season_type = "Playoffs" if period == "playoffs" else "Regular Season"
+    raw_cache_path = NBA_RAW_DIR / "nba_api" / f"team_stats_{season}_{period}.parquet"
+    cached = None if force_refresh else read_cache(raw_cache_path, schema_version=NBA_API_TEAM_STATS_SCHEMA_VERSION)
+    if cached is not None:
+        return cached
+
+    from nba_api.stats.endpoints import leaguedashplayerstats, leaguedashteamstats
+
+    common_kwargs = dict(season=season, season_type_all_star=season_type, per_mode_detailed="PerGame")
+    merged = None
+    for measure_type, cols in TEAM_STATS_MEASURE_COLS.items():
+        raw = leaguedashteamstats.LeagueDashTeamStats(
+            measure_type_detailed_defense=measure_type, **common_kwargs
+        ).get_data_frames()[0][["TEAM_ID"] + cols]
+        merged = raw if merged is None else merged.merge(raw, on="TEAM_ID", how="outer")
+
+    team_abbrev = leaguedashplayerstats.LeagueDashPlayerStats(
+        measure_type_detailed_defense="Base", **common_kwargs
+    ).get_data_frames()[0][["TEAM_ID", "TEAM_ABBREVIATION"]].drop_duplicates()
+    merged = merged.merge(team_abbrev, on="TEAM_ID", how="inner")  # exclut les lignes "TOT"/agrégats éventuels
+
+    rename_map = {
+        "TEAM_ABBREVIATION": "team",
+        "PTS": "pts_per_game", "REB": "reb_per_game", "AST": "ast_per_game",
+        "STL": "stl_per_game", "BLK": "blk_per_game",
+        "FG_PCT": "fg_pct", "FG3_PCT": "fg3_pct", "FT_PCT": "ft_pct",
+        "PIE": "pie",
+    }
+    result = merged.rename(columns=rename_map)[list(rename_map.values())]
+
+    write_cache(result, raw_cache_path, schema_version=NBA_API_TEAM_STATS_SCHEMA_VERSION)
+    return result
 
 
 def _fetch_reliability(season: str, force_refresh: bool = False) -> pd.DataFrame:
@@ -936,30 +950,23 @@ def _extract_kaggle_season(kaggle_df: pd.DataFrame, season: str, max_year_gap: i
 
 
 # --------------------------------------------------------------------------
-# Mode playoffs (get_player_stats(..., period=...)) — voir le diagnostic de faisabilité pour le
-# raisonnement complet. Résumé des décisions :
+# Mode playoffs (get_player_stats(..., period=...)) :
 #   - "regular" (défaut, comportement inchangé) : saison régulière seule, comme avant.
-#   - "playoffs" : stats playoffs SEULES (pas de moyenne). PAS de nouveau modèle : seulement 17%
-#     des joueurs de playoffs atteignent MIN_GAMES_FOR_FIT en playoffs seuls, et cet échantillon
-#     est biaisé vers les franchises qui vont loin en séries (pas juste "petit", structurellement
-#     non représentatif). Le modèle déjà ajusté sur la saison régulière est appliqué TEL QUEL
-#     (coefficients + normalisation de poste) aux valeurs playoffs — même principe que
-#     l'application du modèle vétérans aux rookies.
+#   - "playoffs" : stats playoffs SEULES (pas de moyenne).
 # Le salaire réel (salary_musd/salary_pct_cap) reste TOUJOURS celui de la saison régulière dans
 # les 2 cas : c'est le seul qui existe réellement, les playoffs ne sont pas rémunérés à part.
 #
 # Un 3e mode a existé ("regular_playoffs" : stats combinées saison+playoffs en moyenne pondérée
-# par le total de matchs, modèle réajusté sur cet échantillon combiné) puis a été retiré (décision
-# explicite) : mélanger un échantillon cohérent (saison régulière, 82 matchs pour tout le monde)
-# avec un échantillon non représentatif (playoffs, biaisé par qui se qualifie et jusqu'où)
-# n'apportait pas assez de valeur pour la complexité ajoutée. La fonction qui le calculait
-# (_combine_regular_playoffs_stats) a été supprimée -- PLAYOFF_PERIOD_STAT_COLS ci-dessous reste
-# nécessaire, toujours utilisée par _substitute_playoffs_only_stats (mode "playoffs").
+# par le total de matchs) puis a été retiré (décision explicite) : mélanger un échantillon
+# cohérent (saison régulière, 82 matchs pour tout le monde) avec un échantillon non représentatif
+# (playoffs, biaisé par qui se qualifie et jusqu'où) n'apportait pas assez de valeur pour la
+# complexité ajoutée. La fonction qui le calculait (_combine_regular_playoffs_stats) a été
+# supprimée -- PLAYOFF_PERIOD_STAT_COLS ci-dessous reste nécessaire, toujours utilisée par
+# _substitute_playoffs_only_stats (mode "playoffs").
 
 # Colonnes de stats "par période" (substituées selon `period`) — le reste d'une ligne (salaire,
-# poste, ancienneté, is_rookie_scale...) ne dépend pas de la période choisie. games_played est
-# géré séparément (pas dans cette liste) par _substitute_playoffs_only_stats, qui l'ajoute
-# explicitement à côté.
+# poste...) ne dépend pas de la période choisie. games_played est géré séparément (pas dans cette
+# liste) par _substitute_playoffs_only_stats, qui l'ajoute explicitement à côté.
 PLAYOFF_PERIOD_STAT_COLS = [
     "points_per_game", "rebounds_per_game", "assists_per_game", "steals_per_game",
     "blocks_per_game", "turnovers_per_game", "minutes_per_game", "fg_pct", "fg3_pct",
@@ -976,10 +983,7 @@ def _recompute_derived_stat_columns(df: pd.DataFrame, min_games: int = MIN_GAMES
 
     `min_games` : seuil du badge "échantillon court" -- MIN_GAMES_FOR_FIT (15) par défaut, mais
     l'appelant doit passer MIN_GAMES_FOR_FIT_PLAYOFFS (4) pour period="playoffs" (voir sa
-    docstring pour pourquoi 15 y est structurellement intenable). Ce paramètre ne change QUE le
-    badge d'affichage, jamais le fit_mask du modèle salaire~performance : en mode "playoffs", le
-    modèle reste toujours celui ajusté sur la saison régulière (reg_fit_mask, seuil 15),
-    réutilisé tel quel -- voir get_player_stats."""
+    docstring pour pourquoi 15 y est structurellement intenable)."""
     df = df.copy()
     df["impact_hors_scoring"] = (
         df["rebounds_per_game"] + df["blocks_per_game"] + df["assists_per_game"] + df["steals_per_game"]
@@ -989,13 +993,11 @@ def _recompute_derived_stat_columns(df: pd.DataFrame, min_games: int = MIN_GAMES
 
 
 def _zscore_by_position(stat_source: pd.DataFrame, apply_to: pd.DataFrame, impact_col: str, stat_mask: pd.Series) -> pd.Series:
-    """Z-score de `impact_col` PAR GROUPE DE POSTE (voir historique de VALUE_ADDED_PERFORMANCE_COLS
-    pour le biais que ça corrige) : moyenne/écart-type calculés sur `stat_source[stat_mask]`,
-    appliqués aux valeurs de `apply_to[impact_col]`/`apply_to["position_group"]` — `apply_to` peut
-    être le MÊME DataFrame que `stat_source` (cas normal, saison régulière ou combinée) ou un
-    AUTRE (mode playoffs : moyenne/écart-type calculés sur l'échantillon de fit de la saison
-    régulière, appliqués aux valeurs playoffs des mêmes joueurs — pas de nouvelle normalisation
-    sur un échantillon playoffs trop petit/biaisé, voir le diagnostic de faisabilité)."""
+    """Z-score de `impact_col` PAR GROUPE DE POSTE — moyenne/écart-type calculés sur
+    `stat_source[stat_mask]`, appliqués aux valeurs de `apply_to[impact_col]`/
+    `apply_to["position_group"]` — `apply_to` peut être le MÊME DataFrame que `stat_source` ou un
+    AUTRE (voir compute_radar_scores, seul appelant actuel : normalise un axe du radar de
+    comparaison par rapport aux joueurs du même poste, plutôt qu'en absolu)."""
     group_stats = stat_source.loc[stat_mask].groupby("position_group")[impact_col].agg(["mean", "std"])
     group_mean = apply_to["position_group"].map(group_stats["mean"])
     group_std = apply_to["position_group"].map(group_stats["std"])
@@ -1008,25 +1010,22 @@ def _substitute_playoffs_only_stats(regular_enriched: pd.DataFrame, playoffs: pd
     total) — pour period="playoffs". Un joueur absent de `playoffs` (n'a pas fait les playoffs
     cette saison) se retrouve avec games_played/stats de période à NaN : il disparaîtra du nuage
     comme n'importe quel joueur sans donnée sur les axes choisis (dropna déjà en place côté
-    Dashboard.py), pas de traitement spécial nécessaire ici. Le reste de la ligne (salaire, poste,
-    ancienneté, is_rookie_scale...) est conservé tel quel depuis `regular_enriched` — ces
-    attributs ne dépendent pas de la période."""
+    Dashboard.py), pas de traitement spécial nécessaire ici. Le reste de la ligne (salaire, poste)
+    est conservé tel quel depuis `regular_enriched` — ces attributs ne dépendent pas de la
+    période."""
     drop_cols = [c for c in PLAYOFF_PERIOD_STAT_COLS + ["games_played"] if c in regular_enriched.columns]
     po_cols = ["player_id"] + PLAYOFF_PERIOD_STAT_COLS + ["games_played"]
     return regular_enriched.drop(columns=drop_cols).merge(playoffs[po_cols], on="player_id", how="left")
 
 
-def _enrich_stats(stats: pd.DataFrame, season: str, force_refresh: bool) -> tuple[pd.DataFrame, pd.Series]:
+def _enrich_stats(stats: pd.DataFrame, season: str, force_refresh: bool) -> pd.DataFrame:
     """Ajoute au DataFrame de stats per-game `stats` (même schéma que _fetch_nba_api_stats, quelle
-    que soit la période : régulière ou combinée saison+playoffs) tout ce qui ne dépend QUE du
-    joueur/de la saison, pas des stats de jeu elles-mêmes : salaire réel (TOUJOURS saison
-    régulière, voir docstring de module), ancienneté, poste, impact_hors_scoring dérivé,
-    low_sample_size (sur le games_played fourni) et le z-score de poste (moyenne/écart-type
-    calculés sur cet échantillon lui-même — voir _zscore_by_position pour le cas mode playoffs,
-    qui n'appelle PAS cette fonction et calcule son z-score différemment). Retourne (DataFrame
-    enrichi, fit_mask). Reprend exactement la logique historique de get_player_stats, seulement
-    paramétrée sur `stats` au lieu de le fetcher elle-même — permet de la réutiliser à l'identique
-    pour la saison régulière ET pour l'échantillon combiné saison+playoffs."""
+    que soit la période) tout ce qui ne dépend QUE du joueur/de la saison, pas des stats de jeu
+    elles-mêmes : salaire réel (TOUJOURS saison régulière, voir docstring de module), poste,
+    impact_hors_scoring dérivé et low_sample_size (sur le games_played fourni). Reprend
+    exactement la logique historique de get_player_stats, seulement paramétrée sur `stats` au
+    lieu de le fetcher elle-même — permet de la réutiliser à l'identique pour la saison régulière
+    ET pour l'échantillon combiné saison+playoffs."""
     stats = stats.copy()
     try:
         if int(season[:4]) >= RATIN21_DATASET_START_YEAR:
@@ -1047,16 +1046,6 @@ def _enrich_stats(stats: pd.DataFrame, season: str, force_refresh: bool) -> tupl
     merged["salary_musd"] = merged["salary"] / 1_000_000
 
     try:
-        experience = _fetch_nba_api_experience(season, force_refresh=force_refresh)
-        merged = merged.merge(experience, on="player_id", how="left")
-    except Exception as exc:
-        logger.warning("Ancienneté NBA indisponible pour %s : %s", season, exc)
-        merged["years_experience"] = np.nan
-    # NaN (joueur non retrouvé dans le roster CommonAllPlayers) -> comparaison False ->
-    # traité comme vétéran par défaut, plutôt que de l'exclure à tort du fit faute de donnée.
-    merged["is_rookie_scale"] = merged["years_experience"] < ROOKIE_SCALE_MAX_YEARS
-
-    try:
         positions = _fetch_player_positions(season, force_refresh=force_refresh)
         merged = merged.merge(positions, on="player_id", how="left")
     except Exception as exc:
@@ -1064,11 +1053,7 @@ def _enrich_stats(stats: pd.DataFrame, season: str, force_refresh: bool) -> tupl
         merged["position_group"] = np.nan
 
     merged = _recompute_derived_stat_columns(merged)
-    fit_mask = ~merged["is_rookie_scale"] & ~merged["low_sample_size"]
-    merged["impact_hors_scoring_zscore_poste"] = _zscore_by_position(
-        merged, merged, "impact_hors_scoring", fit_mask
-    )
-    return merged, fit_mask
+    return merged
 
 
 # --------------------------------------------------------------------------
@@ -1081,16 +1066,13 @@ def _enrich_stats(stats: pd.DataFrame, season: str, force_refresh: bool) -> tupl
 # "regular_playoffs".
 PlayoffMode = Literal["regular", "playoffs"]
 def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMode = "regular") -> pd.DataFrame:
-    """Retourne les stats joueurs NBA pour une saison, normalisées et
-    enrichies (salaire, PER, indicateurs de valeur), avec mise en cache
-    disque (data_cache/processed/nba/<season>[_<period>].parquet).
+    """Retourne les stats joueurs NBA pour une saison, normalisées et enrichies (salaire, PER),
+    avec mise en cache disque (data_cache/processed/nba/<season>[_<period>].parquet).
 
     `period` (voir le bloc de commentaires juste au-dessus de PLAYOFF_PERIOD_STAT_COLS pour le
     détail complet) :
       - "regular" (défaut) : comportement historique inchangé, saison régulière seule.
-      - "playoffs" : stats de jeu playoffs SEULES, modèle salaire~performance de la saison
-        régulière appliqué tel quel (PAS de nouveau fit, échantillon playoffs seul trop
-        petit/biaisé — voir le diagnostic de faisabilité).
+      - "playoffs" : stats de jeu playoffs SEULES.
     Dans les 2 cas, le salaire réel (salary_musd/salary_pct_cap) reste celui de la saison
     régulière — c'est le seul qui existe réellement. Un 3e mode combiné ("regular_playoffs") a
     existé puis a été retiré (décision explicite, voir le commentaire au-dessus de
@@ -1112,19 +1094,13 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
             return cached
 
     # --- Base "saison régulière" : TOUJOURS calculée, quel que soit `period` -- utilisée telle
-    # quelle pour period="regular", et comme RÉFÉRENCE (modèle ajusté + stats de normalisation de
-    # poste) pour "playoffs" (pas de refit, voir plus haut).
+    # quelle pour period="regular", et comme point de départ (salaire, poste) pour "playoffs"
+    # (voir _substitute_playoffs_only_stats, qui ne remplace que les stats de jeu).
     reg_stats_raw = _fetch_nba_api_stats(season, force_refresh=force_refresh)
-    reg_merged, reg_fit_mask = _enrich_stats(reg_stats_raw, season, force_refresh)
+    reg_merged = _enrich_stats(reg_stats_raw, season, force_refresh)
 
     if period == "regular":
-        # Comportement strictement inchangé : compute_value_added ajuste ET applique lui-même
-        # (voir base.py) -- pas de passage par fit_value_model/apply_value_model séparément ici,
-        # pour rester sur le chemin de code le plus proche possible de l'historique.
-        working = compute_value_added(
-            reg_merged, salary_col="salary", performance_cols=VALUE_ADDED_PERFORMANCE_COLS,
-            fit_mask=reg_fit_mask,
-        )
+        working = reg_merged
     else:  # "playoffs"
         po_stats_raw = _fetch_nba_api_stats_playoffs(season, force_refresh=force_refresh)
         working = _substitute_playoffs_only_stats(reg_merged, po_stats_raw)
@@ -1132,61 +1108,14 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
         # utiliser un seuil adapté au nombre de matchs RÉELLEMENT jouable en playoffs, voir sa
         # docstring pour la justification complète.
         working = _recompute_derived_stat_columns(working, min_games=MIN_GAMES_FOR_FIT_PLAYOFFS)
-        # PAS de nouveau z-score : réutilise la moyenne/écart-type de poste de la SAISON
-        # RÉGULIÈRE (échantillon de fit reg_fit_mask), appliquée aux valeurs playoffs — voir
-        # _zscore_by_position et le diagnostic de faisabilité (échantillon playoffs seul trop
-        # petit/biaisé pour une nouvelle normalisation).
-        working["impact_hors_scoring_zscore_poste"] = _zscore_by_position(
-            reg_merged, working, "impact_hors_scoring", reg_fit_mask
-        )
-        # PAS de nouveau modèle : réutilise (fit_value_model + apply_value_model plutôt que
-        # compute_value_added) le modèle déjà ajusté sur la saison régulière, appliqué tel quel
-        # aux valeurs playoffs -- voir le diagnostic de faisabilité (échantillon playoffs seul
-        # trop petit et biaisé vers les franchises qui vont loin en séries).
-        fitted = fit_value_model(
-            reg_merged, salary_col="salary", performance_cols=VALUE_ADDED_PERFORMANCE_COLS,
-            fit_mask=reg_fit_mask,
-        )
-        working = apply_value_model(working, fitted, salary_col="salary")
 
-    working["expected_salary_musd"] = working["expected_salary"] / 1_000_000
-    working["value_added_musd"] = working["value_added"] / 1_000_000
-    # Marge d'incertitude du modèle (écart-type des résidus sur l'échantillon de fit) — affichée
-    # dans l'infobulle à côté du salaire attendu, voir Dashboard.py._build_hover_text.
-    working["value_added_residual_std_musd"] = working["value_added_residual_std"] / 1_000_000
-    # Médiane et quartiles des résidus de l'échantillon de fit (voir base.apply_value_model) —
-    # affichés dans l'expander méthodologie à côté de la marge (± écart-type) déjà là, pour voir
-    # si la distribution des résidus est à peu près symétrique ou asymétrique (l'écart-type seul
-    # ne le dit pas).
-    working["value_added_residual_median_musd"] = working["value_added_residual_median"] / 1_000_000
-    working["value_added_residual_q1_musd"] = working["value_added_residual_q1"] / 1_000_000
-    working["value_added_residual_q3_musd"] = working["value_added_residual_q3"] / 1_000_000
-
-    # Normalisation en % du plafond salarial officiel de la saison (voir NBA_SALARY_CAP_BY_SEASON) :
-    # rend les montants comparables entre saisons très éloignées (24M$ de plafond en 1996-97 contre
-    # 154M$ en 2025-26 rendraient sinon la vue "Toutes les saisons" dominée par les saisons récentes).
+    # Normalisation en % du plafond salarial officiel de la saison -- rend les montants
+    # comparables entre saisons très éloignées (24M$ de plafond en 1996-97 contre 154M$ en
+    # 2025-26 rendraient sinon la vue "Toutes les saisons" dominée par les saisons récentes).
     # .get(season) plutôt que [season] : NaN silencieux (pas de crash) si une saison hors de
     # NBA_SALARY_CAP_BY_SEASON était un jour demandée (ex. période dans KNOWN_SALARY_DATA_GAPS).
     season_cap = NBA_SALARY_CAP_BY_SEASON.get(season)
     working["salary_pct_cap"] = working["salary"] / season_cap if season_cap else np.nan
-    working["expected_salary_pct_cap"] = working["expected_salary"] / season_cap if season_cap else np.nan
-    working["value_added_pct_cap"] = working["value_added"] / season_cap if season_cap else np.nan
-    # Même marge d'incertitude que value_added_residual_std_musd, en % du plafond — utilisée par
-    # Dashboard.py pour la bande d'incertitude de la trajectoire de valeur ajoutée par joueur (largeur
-    # variable par saison, le R² du modèle n'étant pas stable dans le temps : voir le diagnostic
-    # de faisabilité, corrélation R²/année confirmée significative, p<0.001).
-    working["value_added_residual_std_pct_cap"] = (
-        working["value_added_residual_std"] / season_cap if season_cap else np.nan
-    )
-    working["value_added_residual_median_pct_cap"] = (
-        working["value_added_residual_median"] / season_cap if season_cap else np.nan
-    )
-    working["value_added_residual_q1_pct_cap"] = (
-        working["value_added_residual_q1"] / season_cap if season_cap else np.nan
-    )
-    working["value_added_residual_q3_pct_cap"] = (
-        working["value_added_residual_q3"] / season_cap if season_cap else np.nan
-    )
 
     try:
         reliability = _fetch_reliability(season, force_refresh=force_refresh)
@@ -1195,30 +1124,43 @@ def get_player_stats(season: str, force_refresh: bool = False, period: PlayoffMo
         logger.warning("Fiabilité indisponible pour %s : %s", season, exc)
         working["reliability_pct"] = np.nan
 
-    # Ne met en cache que si value_added a pu être ajusté normalement. Si le modèle n'a pas pu
-    # être ajusté cette saison (ex: postes indisponibles malgré les retries de
-    # _fetch_player_positions, ou tout autre souci faisant tomber value_added_r2 à NaN — même
-    # principe que le fix du cache de fiabilité), on retourne quand même le résultat à
-    # l'appelant (pas de crash, les autres colonnes restent utilisables) mais on ne le grave PAS
-    # sur disque : un value_added dégradé ne doit jamais être servi silencieusement comme
-    # définitif. Le prochain chargement retentera plutôt que de rester bloqué dessus.
-    value_added_ok = "value_added_r2" in working.columns and pd.notna(working["value_added_r2"].iloc[0])
-    if value_added_ok:
-        write_cache(working, processed_path, schema_version=PROCESSED_SCHEMA_VERSION)
-    else:
-        logger.warning(
-            "get_player_stats(%s, period=%s) : value_added n'a pas pu être ajusté (postes ou "
-            "autre donnée indisponible), résultat non mis en cache pour forcer une nouvelle "
-            "tentative au prochain chargement.", season, period,
-        )
+    write_cache(working, processed_path, schema_version=PROCESSED_SCHEMA_VERSION)
     return working
+
+
+def get_team_ranking(season: str, period: PlayoffMode = "regular", force_refresh: bool = False) -> pd.DataFrame:
+    """Classement des équipes pour le bandeau de Dashboard.py -- vraies stats d'ÉQUIPE
+    (_fetch_team_stats, PAS une moyenne des joueurs affichés/filtrés dans le scatter plot) +
+    masse salariale totale de l'effectif + indicateur "champion" (CHAMPIONS_BY_SEASON).
+
+    `period` ("regular"/"playoffs") pilote UNIQUEMENT les stats de jeu d'équipe, indépendamment
+    du mode saison régulière/playoffs éventuellement choisi ailleurs dans le dashboard pour le
+    scatter plot -- une équipe non qualifiée en playoffs n'a simplement pas de ligne ici.
+
+    La masse salariale reste TOUJOURS sommée sur la saison régulière (même logique que
+    salary_musd dans get_player_stats : le salaire est un concept saison régulière, pas
+    playoffs) quel que soit `period`. `sum(min_count=1)` plutôt qu'un simple `.sum()` : une
+    équipe dont AUCUN joueur n'a de salaire connu doit ressortir à NaN, pas à 0 -- une masse
+    salariale à 0$ serait trompeuse (silencieusement confondue avec une vraie donnée)."""
+    team_stats = _fetch_team_stats(season, period=period, force_refresh=force_refresh)
+
+    players = get_player_stats(season, force_refresh=force_refresh, period="regular")
+    salary_by_team = (
+        players.dropna(subset=["team"])
+        .groupby("team")["salary_musd"].sum(min_count=1)
+        .rename("salary_total_musd")
+        .reset_index()
+    )
+
+    result = team_stats.merge(salary_by_team, on="team", how="left")
+    result["champion"] = result["team"] == CHAMPIONS_BY_SEASON.get(season)
+    return result
 
 
 # --------------------------------------------------------------------------
 # Radar de comparaison de joueurs (voir pages/1_Radar_de_comparaison.py) — dix axes de skill
 # dérivés de colonnes déjà présentes dans get_player_stats (catalogue METRICS), normalisés par
-# poste avec la MÊME fonction (_zscore_by_position) que le modèle de valeur ajoutée, plutôt qu'un
-# nouveau système de normalisation (proposition validée). Section volontairement placée après
+# poste avec _zscore_by_position (voir sa docstring). Section volontairement placée après
 # get_player_stats : fonctionnalité indépendante du pipeline principal, qui n'a besoin d'aucune
 # de ces colonnes.
 #

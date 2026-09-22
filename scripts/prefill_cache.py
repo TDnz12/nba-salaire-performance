@@ -53,7 +53,7 @@ def main() -> None:
             processed_path = nba.NBA_PROCESSED_DIR / f"{season}.parquet"
             cached_ok = processed_path.exists()
             n_salary = int(df["salary_musd"].notna().sum())
-            status = "OK" if cached_ok else "OK (non mis en cache - value_added dégradé, voir logs)"
+            status = "OK" if cached_ok else "OK (non mis en cache, voir logs)"
             print(f"    -> {status} en {elapsed:.1f}s, {len(df)} joueurs, {n_salary} avec salaire")
             results[season] = (cached_ok, elapsed, "")
         except Exception as exc:
@@ -73,7 +73,7 @@ def main() -> None:
         print(f"Échouées ou non mises en cache : {n_fail}/{len(seasons)}")
         for season, (ok, elapsed, err) in results.items():
             if not ok:
-                print(f"  - {season} ({elapsed:.1f}s) : {err or 'value_added non ajusté, voir logs ci-dessus'}")
+                print(f"  - {season} ({elapsed:.1f}s) : {err or 'voir logs ci-dessus'}")
         print("\nRelance le script (sans --force) pour ne retenter que les saisons manquantes.")
     else:
         print("Toutes les saisons sont en cache.")

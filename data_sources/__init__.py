@@ -56,6 +56,20 @@ class SportConfig:
     radar_axes: Optional[list] = None
     compute_radar_scores: Optional[Callable[..., pd.DataFrame]] = None
     radar_caveats: Optional[list] = None
+    # Bandeau "classement des équipes" (Dashboard.py, bas de page) : get_team_ranking(season,
+    # period="regular"/"playoffs") -> pd.DataFrame de vraies stats d'ÉQUIPE (pas une moyenne des
+    # joueurs affichés/filtrés dans le scatter plot) + masse salariale totale + colonne booléenne
+    # "champion" ; team_ranking_metrics est le catalogue dédié (voir nba.TEAM_RANKING_METRICS),
+    # volontairement séparé de `metrics` (catalogue joueurs). Les 2 optionnels ensemble (None par
+    # défaut) -- Dashboard.py doit gérer leur absence sans planter, même principe que
+    # award_badges_fn/radar_axes ci-dessus.
+    get_team_ranking: Optional[Callable[..., pd.DataFrame]] = None
+    team_ranking_metrics: Optional[dict] = None
+    # Page "Rosters" (pages/2_Rosters.py) : get_teams_static() -> liste des franchises actuelles
+    # (id/abbreviation/full_name..., voir nba.get_teams_static) pour la grille de logos cliquable
+    # et la construction des URLs de logo/photo du CDN NBA. Optionnel (None par défaut) -- même
+    # principe que les champs ci-dessus, la page doit gérer l'absence sans planter.
+    get_teams_static: Optional[Callable[[], list]] = None
 
 
 # --- Sport actif ---------------------------------------------------------
@@ -73,6 +87,9 @@ NBA = SportConfig(
     radar_axes=nba.RADAR_AXES,
     compute_radar_scores=nba.compute_radar_scores,
     radar_caveats=nba.RADAR_CAVEATS,
+    get_team_ranking=nba.get_team_ranking,
+    team_ranking_metrics=nba.TEAM_RANKING_METRICS,
+    get_teams_static=nba.get_teams_static,
 )
 
 # --- Sports à venir (aucune implémentation, juste affichés "bientôt") ----

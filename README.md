@@ -1,14 +1,14 @@
 # NBA Salary vs Performance Dashboard
 
-Dashboard interactif qui croise stats de jeu et salaires NBA pour repérer les joueurs sous-payés ou surpayés par rapport à leur performance. Construit avec Streamlit, architecture pensée pour accueillir d'autres sports (rugby, foot, MMA, tennis) sans réécrire le dashboard.
+Dashboard interactif qui croise stats de jeu et salaires NBA, saison par saison ou sur l'historique complet. Construit avec Streamlit, architecture pensée pour accueillir d'autres sports (rugby, foot, MMA, tennis) sans réécrire le dashboard.
 
 **Démo en ligne :** https://sportsanalyticsdashboard.streamlit.app
 
 ## Fonctionnalités
 
 - Scatter plot salaire vs performance, sur 30 saisons NBA (1996-97 à 2025-26)
-- Modèle de régression qui calcule un salaire attendu par joueur et une valeur ajoutée (sous-évalué / surévalué)
-- Vue combinée toutes saisons, classement par équipe, badges MVP/DPOY/champion, mode saison régulière ou playoffs
+- Vue combinée toutes saisons, badges MVP/DPOY/champion, mode saison régulière ou playoffs
+- Radar de comparaison entre joueurs sur un ensemble de métriques normalisées par poste
 - Normalisation en % du plafond salarial pour comparer des saisons éloignées dans le temps
 
 ## Installation
@@ -41,11 +41,11 @@ Deux options, gratuites :
 
 **Manuelle** : télécharge les CSV directement depuis les pages Kaggle et dépose-les dans `data_cache/raw/nba/manual/` (et `manual_legacy/` pour le second dataset). L'app les détecte automatiquement.
 
-Sans configuration, le dashboard fonctionne quand même : les stats de jeu s'affichent, seules les colonnes salaire/valeur restent vides pour les saisons concernées.
+Sans configuration, le dashboard fonctionne quand même : les stats de jeu s'affichent, seule la colonne salaire reste vide pour les saisons concernées.
 
 ### Normalisation en % du plafond salarial
 
-Le plafond salarial NBA a été multiplié par plus de 6 entre 1996-97 (24,4 M$) et 2025-26 (154,6 M$), donc comparer des montants bruts entre saisons éloignées n'a pas grand sens. Le dashboard calcule aussi salaire, salaire attendu et valeur ajoutée en % du plafond de la saison, sélectionnables comme n'importe quelle autre métrique.
+Le plafond salarial NBA a été multiplié par plus de 6 entre 1996-97 (24,4 M$) et 2025-26 (154,6 M$), donc comparer des montants bruts entre saisons éloignées n'a pas grand sens. Le dashboard calcule aussi le salaire en % du plafond de la saison, sélectionnable comme n'importe quelle autre métrique.
 
 ## Pré-remplir le cache
 
@@ -72,23 +72,9 @@ scripts/
 
 Ajouter un sport revient à créer `data_sources/<sport>.py` avec une fonction `get_player_stats()` et l'enregistrer dans `data_sources/__init__.py` — rien à changer dans `Dashboard.py`, le sélecteur de sport et les graphiques se construisent automatiquement à partir du registre.
 
-## Méthodologie : le modèle de valeur ajoutée
+## Méthodologie
 
-Une régression linéaire (scikit-learn) prédit le salaire attendu d'un joueur à partir de sa performance. La différence entre salaire attendu et salaire réel donne la valeur ajoutée : positif si le joueur est sous-payé par rapport à sa perf, négatif s'il est surpayé.
-
-Les variables retenues pour la NBA sont le PIE (Player Impact Estimate) et un indicateur "impact hors scoring" (rebonds, contres, passes, interceptions). Ce choix résulte de plusieurs itérations :
-
-- Le PIE seul dégradait fortement le modèle et sous-estimait des joueurs comme Wembanyama, le marché récompensant davantage le scoring que ce que le PIE seul capture.
-- PIE + points par match améliorait l'ajustement mais souffrait de colinéarité (les deux variables sont corrélées à ~0.74 chez les vétérans), ce qui rendait le coefficient du PIE négatif, un artefact statistique plutôt qu'un vrai signal.
-- La version actuelle (PIE + impact hors scoring) règle ce problème de cohérence : sur environ 28 000 paires de vétérans où un joueur domine strictement un autre sur les deux variables, on passe de 753 violations à 1 seule. Le compromis, c'est un R² plus bas, le scoring, meilleur prédicteur brut du salaire, étant volontairement exclu.
-
-Le modèle est ajusté séparément sur les vétérans (hors 4 premières saisons de contrat rookie, dont le salaire est fixé par convention collective) et exclut les échantillons trop courts (moins de 15 matchs joués), affichés différemment sur le graphique mais pas cachés du classement.
-
-Détail des itérations et tests : voir [METHODOLOGY.md](METHODOLOGY.md).
-
-### Limite connue : sous-valorisation des scoreurs purs
-
-Un biais statistiquement significatif (p<0.05, testé sur plusieurs saisons) fait apparaître les très gros scoreurs (type Jordan, Curry) comme relativement sous-évalués par le modèle par rapport aux profils plus all-around. Trois pistes de correction ont été testées (retrait du PIE, ajout d'une variable de rating d'équipe non corrélée au poste, pondération réduite) sans succès probant : le biais persiste même sans la variable qu'on suspectait, ce qui suggère qu'il s'agit d'une vraie prime du marché au volume de scoring plutôt que d'un artefact de calcul. Un avertissement à ce sujet est affiché directement dans le dashboard.
+Détail des choix de métriques, des pistes testées et abandonnées, et des limites connues : voir [METHODOLOGY.md](METHODOLOGY.md).
 
 ## Limites connues
 
@@ -98,4 +84,4 @@ Un biais statistiquement significatif (p<0.05, testé sur plusieurs saisons) fai
 
 ## Stack technique
 
-Python, Streamlit, pandas, scikit-learn, Plotly, nba_api, datasets Kaggle.
+Python, Streamlit, pandas, Plotly, nba_api, datasets Kaggle.
