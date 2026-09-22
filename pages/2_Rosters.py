@@ -35,12 +35,42 @@ st.set_page_config(page_title="Rosters — Sports Analytics", page_icon="👥", 
 st.markdown(
     """
     <style>
+    /* Même réduction de la barre d'outils Streamlit tout en haut + de stSidebarHeader (rangée du
+       bouton replier la sidebar) que Dashboard.py -- voir son commentaire d'origine pour le
+       détail (root cause min-height, trouvée en inspectant le DOM réel, pas devinée) et le
+       pourquoi de chaque valeur. */
+    header[data-testid="stHeader"] {
+        height: 2.25rem !important;
+        min-height: 2.25rem !important;
+    }
+    div[data-testid="stSidebarHeader"] {
+        height: 2.25rem !important;
+        min-height: 0 !important;
+        padding-top: 0.25rem !important;
+        padding-bottom: 0.25rem !important;
+    }
+    /* Titre déplacé dans stLogoSpacer -- voir le commentaire d'origine dans Dashboard.py.
+       st.sidebar.title() plus bas retiré en conséquence. */
+    div[data-testid="stLogoSpacer"] {
+        width: auto !important;
+        display: flex;
+        align-items: center;
+    }
+    div[data-testid="stLogoSpacer"]::before {
+        content: "👥 Rosters";
+        font-weight: 700;
+        font-size: 1rem;
+        white-space: nowrap;
+    }
     div[data-testid="stAppViewBlockContainer"], .block-container {
-        padding-top: 1.5rem !important;
+        padding-top: 1.25rem !important;
     }
     div[data-testid="stAppViewBlockContainer"] h1:first-of-type {
         margin-top: 0 !important;
         padding-top: 0 !important;
+    }
+    div[data-testid="stSidebarNav"] {
+        padding-top: 0.2rem;
     }
     section[data-testid="stSidebar"] {
         padding-top: 0 !important;
@@ -135,7 +165,8 @@ components.html(
     height=0,
 )
 
-st.sidebar.title("👥 Rosters")
+# Titre retiré d'ici : fusionné dans la rangée du bouton replier la sidebar tout en haut (voir le
+# commentaire CSS de stLogoSpacer plus haut, dans le bloc de densité).
 
 # MVP : NBA uniquement, même raison que pages/1_Radar_de_comparaison.py (pas de sélecteur de
 # sport tant qu'un second sport n'a pas sa propre implémentation).

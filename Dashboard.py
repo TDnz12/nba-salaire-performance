@@ -26,13 +26,71 @@ st.set_page_config(page_title="Sports Analytics Dashboard", page_icon="🏀", la
 st.markdown(
     """
     <style>
-    /* Remonte tout le contenu principal (le gros titre + le graph juste en dessous). */
+    /* Barre d'outils Streamlit tout en haut (icône menu, bouton Deploy visible seulement pour moi
+       en tant que propriétaire). Root cause trouvée en inspectant le DOM réel de l'app (pas
+       devinée) : cet élément a un `min-height: 60px` fixé par Streamlit -- une règle `height`
+       seule (ce qu'on avait avant) ne peut jamais descendre sous un min-height, d'où l'absence
+       totale d'effet des deux tentatives précédentes. Il faut aussi écraser min-height, avec
+       !important (Streamlit charge sa feuille de style après la nôtre). Testé directement dans le
+       navigateur avant d'écrire cette valeur : la barre se réduit bien, bouton Deploy et menu "..."
+       restent entièrement visibles et cliquables. */
+    header[data-testid="stHeader"] {
+        height: 2.25rem !important;
+        min-height: 2.25rem !important;
+    }
+
+    /* Deuxième élément non documenté trouvé au même endroit : stSidebarHeader, une rangée de
+       60px en haut de la SIDEBAR (distincte de la barre ci-dessus) qui contient seulement le
+       bouton « replier la sidebar » -- jamais ciblée jusqu'ici, c'est elle qui expliquait le
+       "beaucoup trop d'espace au-dessus de Dashboard" (aucune règle plus haut ne la touchait).
+       Testé de la même façon : le bouton reste pleinement cliquable une fois la rangée réduite. */
+    div[data-testid="stSidebarHeader"] {
+        height: 2.25rem !important;
+        min-height: 0 !important;
+        padding-top: 0.25rem !important;
+        padding-bottom: 0.25rem !important;
+    }
+
+    /* Titre "🏆 Sports Analytics" déplacé ICI (retour utilisateur), dans stLogoSpacer -- un
+       emplacement vide que Streamlit réserve dans cette même rangée pour un futur st.logo(), donc
+       juste à gauche du bouton « replier la sidebar ». width: auto (au lieu de 0 par défaut, vide
+       tant qu'aucun logo n'est fourni) + contenu via ::before (pas de balise <img>/texte natif
+       disponible ici, juste ce slot vide) : fusionne le titre et cette rangée au lieu de deux
+       lignes séparées, l'ancien st.sidebar.title() plus bas est retiré en conséquence (voir plus
+       bas dans le script). Testé en direct : tient largement même avec le titre le plus long des
+       3 pages ("🎯 Radar de comparaison"), pas de chevauchement avec le bouton. */
+    div[data-testid="stLogoSpacer"] {
+        width: auto !important;
+        display: flex;
+        align-items: center;
+    }
+    div[data-testid="stLogoSpacer"]::before {
+        content: "🏆 Sports Analytics";
+        font-weight: 700;
+        font-size: 1rem;
+        white-space: nowrap;
+    }
+
+    /* Remonte tout le contenu principal (le gros titre + le graph juste en dessous). Revenu à
+       1.25rem (valeur confirmée sans coupure du titre) plutôt que de continuer à descendre ce
+       chiffre : le vrai gain d'espace restant vient des deux règles ci-dessus (barre du haut +
+       stSidebarHeader), pas d'un padding encore plus serré ici -- inutile de reprendre le risque
+       de couper l'emoji du titre pour un gain marginal. */
     div[data-testid="stAppViewBlockContainer"], .block-container {
-        padding-top: 1.5rem !important;
+        padding-top: 1.25rem !important;
     }
     div[data-testid="stAppViewBlockContainer"] h1:first-of-type {
         margin-top: 0 !important;
         padding-top: 0 !important;
+    }
+
+    /* Espace au-dessus des liens de navigation multi-page (Dashboard / Radar de comparaison /
+       Rosters), juste en dessous de stSidebarHeader ci-dessus -- zone distincte du bloc "Sports
+       Analytics" et de ses widgets encore en dessous (compactés par les règles suivantes, déjà en
+       place). Pas de risque d'emoji/glyphe ici (juste du texte de lien), donc réduit plus
+       franchement que le titre. */
+    div[data-testid="stSidebarNav"] {
+        padding-top: 0.2rem;
     }
 
     /* Sidebar : espace au-dessus du titre "Sports Analytics" quasi supprimé (le premier essai
@@ -79,10 +137,16 @@ st.markdown(
 # --------------------------------------------------------------------------
 # Sidebar : sélection du sport / saison / métriques / filtres
 # --------------------------------------------------------------------------
-st.sidebar.title("🏆 Sports Analytics")
+# Titre retiré d'ici : fusionné dans la rangée du bouton replier la sidebar tout en haut (voir le
+# commentaire CSS de stLogoSpacer plus haut) pour gagner une ligne entière de hauteur.
 
 sport_keys = list(SPORTS.keys())
-sport_choice_key = st.sidebar.radio(
+# selectbox (pas radio) : un radio à 5 options (dont 4 pas encore disponibles, juste là pour
+# annoncer la suite) prenait 5 lignes de hauteur dans une sidebar déjà chargée -- retour
+# utilisateur : ça poussait les sélecteurs d'axes (X/Y), bien plus utilisés au quotidien, sous la
+# ligne de flottaison. Un menu déroulant replié fait la même chose sur 1 ligne, rien ne change
+# côté fonctionnel (mêmes options, même format_func).
+sport_choice_key = st.sidebar.selectbox(
     "Sport",
     options=sport_keys,
     format_func=lambda k: SPORTS[k].label if SPORTS[k].available else f"{SPORTS[k].label} — bientôt disponible",
@@ -242,39 +306,12 @@ def metric_label(key: str) -> str:
     return f"{m.label}  ·  {m.category}"
 
 
-# Ordre de la sidebar pensé par praticité d'usage : d'abord retrouver un joueur précis, puis
-# choisir ce qu'on regarde (axes/couleur/taille), puis affiner (filtres), puis un réglage de
-# fiabilité des données en dernier (le moins souvent utile).
-st.sidebar.markdown("---")
-player_options = ["Aucun"] + sorted(df["player"].dropna().unique().tolist())
-searched_player = st.sidebar.selectbox(
-    "🔍 Rechercher un joueur",
-    options=player_options,
-    index=0,
-    help="Tape un nom pour filtrer la liste. Le joueur sélectionné est entouré sur le graph.",
-)
-
-def _handle_radar_click() -> None:
-    # Exécuté par Streamlit avant le switch de page (callback on_click, même mécanisme que
-    # _handle_refresh_click plus bas) : dépose le joueur/la saison dans st.session_state, lus
-    # puis pop() par la page radar pour ne pré-sélectionner qu'une fois (même pattern que
-    # _pending_force_refresh). st.switch_page ici plutôt que dans le corps du script : un
-    # switch_page() appelé en dehors d'un callback interromprait immédiatement le script AVANT
-    # que le reste de la sidebar (filtres, bouton Rafraîchir...) n'ait fini de s'afficher.
-    st.session_state["radar_preselect_player"] = searched_player
-    st.session_state["radar_preselect_season"] = None if is_all_seasons else season
-    st.switch_page("pages/1_Radar_de_comparaison.py")
-
-
-if searched_player != "Aucun":
-    st.sidebar.button(
-        "🎯 Voir le profil radar", on_click=_handle_radar_click,
-        help="Ouvre la vue radar de comparaison de profils avec ce joueur pré-sélectionné.",
-    )
-
-teams = sorted(df["team"].dropna().unique().tolist())
-team_filter = st.sidebar.multiselect("Filtrer par équipe (optionnel)", options=teams)
-
+# Ordre de la sidebar (revu -- retour utilisateur, version précédente avait les axes X/Y sous la
+# ligne de flottaison) : d'abord CE QU'ON REGARDE (axes/couleur/taille), juste après saison/
+# période -- c'est la première chose qu'on veut voir/changer à l'ouverture de l'app. Puis la
+# recherche joueur (utilisée quasi à chaque session, doit rester visible sans clic). Le reste
+# (équipe, seuils minutes/matchs, salaires estimés, rafraîchir -- consultés occasionnellement,
+# jamais à l'ouverture) est replié dans un expander pour ne pas alourdir le bandeau par défaut.
 st.sidebar.markdown("---")
 x_key = st.sidebar.selectbox(
     "Statistique en abscisse (X)", options=metric_keys, format_func=metric_label,
@@ -305,43 +342,76 @@ size_key = st.sidebar.selectbox(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Filtres")
-min_minutes = st.sidebar.slider(
-    "Minutes par match minimum (filtrer le bruit \"garbage time\")",
-    min_value=0.0, max_value=40.0, value=8.0, step=1.0, key="min_minutes",
-)
-# Seuil interne mentionné dans le help ci-dessous : 15 matchs en saison régulière
-# (MIN_GAMES_FOR_FIT), mais 4 en playoffs (MIN_GAMES_FOR_FIT_PLAYOFFS, voir son commentaire dans
-# data_sources/nba.py pour pourquoi 15 y est intenable) -- texte dynamique selon stats_period
-# (déjà connu à ce stade du script) plutôt qu'un nombre en dur qui serait faux la moitié du temps.
-_internal_threshold_txt = "4 matchs en playoffs" if stats_period == "playoffs" else "15 matchs en saison régulière"
-min_games = st.sidebar.slider(
-    "Nombre de matchs joués minimum",
-    min_value=0, max_value=82, value=0, step=1, key="min_games",
-    help=(
-        "Filtre uniquement l'affichage (graph + tableau). Un seuil interne "
-        f"({_internal_threshold_txt}, voir data_sources/nba.py) est indépendant de ce curseur — "
-        "les joueurs sous ce seuil sont visibles par défaut (badge ⚠️ losange creux dans le "
-        "graph, échantillon court), à toi de décider si tu veux les masquer."
-    ),
+player_options = ["Aucun"] + sorted(df["player"].dropna().unique().tolist())
+searched_player = st.sidebar.selectbox(
+    "🔍 Rechercher un joueur",
+    options=player_options,
+    index=0,
+    help="Tape un nom pour filtrer la liste. Le joueur sélectionné est entouré sur le graph.",
 )
 
-st.sidebar.markdown("---")
-n_estimated = int(df.get("salary_is_estimated", pd.Series(dtype=bool)).sum())
-include_estimated_salary = True
-if n_estimated:
-    include_estimated_salary = st.sidebar.checkbox(
-        f"Inclure les salaires estimés (année proche) — {n_estimated} joueur(s)",
-        value=True,
+def _handle_radar_click() -> None:
+    # Exécuté par Streamlit avant le switch de page (callback on_click, même mécanisme que
+    # _handle_refresh_click plus bas) : dépose le joueur/la saison dans st.session_state, lus
+    # puis pop() par la page radar pour ne pré-sélectionner qu'une fois (même pattern que
+    # _pending_force_refresh). st.switch_page ici plutôt que dans le corps du script : un
+    # switch_page() appelé en dehors d'un callback interromprait immédiatement le script AVANT
+    # que le reste de la sidebar (filtres, bouton Rafraîchir...) n'ait fini de s'afficher.
+    st.session_state["radar_preselect_player"] = searched_player
+    st.session_state["radar_preselect_season"] = None if is_all_seasons else season
+    st.switch_page("pages/1_Radar_de_comparaison.py")
+
+
+if searched_player != "Aucun":
+    st.sidebar.button(
+        "🎯 Voir le profil radar", on_click=_handle_radar_click,
+        help="Ouvre la vue radar de comparaison de profils avec ce joueur pré-sélectionné.",
+    )
+
+# Filtres avancés repliés (équipe, seuils minutes/matchs, salaires estimés, rafraîchir) -- voir le
+# commentaire d'ordre de la sidebar plus haut. expanded=False : replié par défaut, l'utilisateur
+# l'ouvre seulement s'il en a besoin ce jour-là.
+with st.sidebar.expander("⚙️ Filtres avancés"):
+    teams = sorted(df["team"].dropna().unique().tolist())
+    team_filter = st.multiselect("Filtrer par équipe (optionnel)", options=teams)
+
+    st.markdown("---")
+    min_minutes = st.slider(
+        "Minutes par match minimum (filtrer le bruit \"garbage time\")",
+        min_value=0.0, max_value=40.0, value=8.0, step=1.0, key="min_minutes",
+    )
+    # Seuil interne mentionné dans le help ci-dessous : 15 matchs en saison régulière
+    # (MIN_GAMES_FOR_FIT), mais 4 en playoffs (MIN_GAMES_FOR_FIT_PLAYOFFS, voir son commentaire dans
+    # data_sources/nba.py pour pourquoi 15 y est intenable) -- texte dynamique selon stats_period
+    # (déjà connu à ce stade du script) plutôt qu'un nombre en dur qui serait faux la moitié du temps.
+    _internal_threshold_txt = "4 matchs en playoffs" if stats_period == "playoffs" else "15 matchs en saison régulière"
+    min_games = st.slider(
+        "Nombre de matchs joués minimum",
+        min_value=0, max_value=82, value=0, step=1, key="min_games",
         help=(
-            "Le dataset Kaggle n'a pas de ligne salaire pour l'année exacte de tous les "
-            "joueurs. Pour ceux-là, on utilise le salaire de l'année la plus proche "
-            "disponible (± 2 ans). Décoche pour ne garder que les salaires exacts."
+            "Filtre uniquement l'affichage (graph + tableau). Un seuil interne "
+            f"({_internal_threshold_txt}, voir data_sources/nba.py) est indépendant de ce curseur — "
+            "les joueurs sous ce seuil sont visibles par défaut (badge ⚠️ losange creux dans le "
+            "graph, échantillon court), à toi de décider si tu veux les masquer."
         ),
     )
 
-st.sidebar.markdown("---")
-st.sidebar.button("🔄 Rafraîchir les données (re-télécharger)", on_click=_handle_refresh_click)
+    n_estimated = int(df.get("salary_is_estimated", pd.Series(dtype=bool)).sum())
+    include_estimated_salary = True
+    if n_estimated:
+        st.markdown("---")
+        include_estimated_salary = st.checkbox(
+            f"Inclure les salaires estimés (année proche) — {n_estimated} joueur(s)",
+            value=True,
+            help=(
+                "Le dataset Kaggle n'a pas de ligne salaire pour l'année exacte de tous les "
+                "joueurs. Pour ceux-là, on utilise le salaire de l'année la plus proche "
+                "disponible (± 2 ans). Décoche pour ne garder que les salaires exacts."
+            ),
+        )
+
+    st.markdown("---")
+    st.button("🔄 Rafraîchir les données (re-télécharger)", on_click=_handle_refresh_click)
 
 
 # --------------------------------------------------------------------------
