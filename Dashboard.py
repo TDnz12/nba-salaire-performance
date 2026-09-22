@@ -107,13 +107,15 @@ st.markdown(
         padding-top: 0 !important;
     }
 
-    /* Sidebar : espace vertical entre chaque widget — un peu plus aéré que le premier essai
-       (0.35rem), sans revenir à l'espacement par défaut de Streamlit. */
+    /* Sidebar : espace vertical entre chaque widget, resserré à la demande de l'utilisateur
+       (0.7rem/0.3rem jugé encore trop espacé). Testé en direct dans le navigateur avant de
+       livrer : à 0.25rem/0.1rem les champs restent bien lisibles et ne se touchent pas, et les
+       7 critères (Sport → Taille des points) tiennent visibles sans scroll. */
     section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
-        gap: 0.7rem !important;
+        gap: 0.25rem !important;
     }
     section[data-testid="stSidebar"] [data-testid="stElementContainer"] {
-        margin-bottom: 0.3rem !important;
+        margin-bottom: 0.1rem !important;
     }
 
     /* Titres et séparateurs de la sidebar (titre, "Filtres", lignes "---") moins espacés. */

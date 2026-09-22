@@ -75,11 +75,12 @@ st.markdown(
         margin-top: 0 !important;
         padding-top: 0 !important;
     }
+    /* Espacement resserré, voir le commentaire d'origine dans Dashboard.py. */
     section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
-        gap: 0.7rem !important;
+        gap: 0.25rem !important;
     }
     section[data-testid="stSidebar"] [data-testid="stElementContainer"] {
-        margin-bottom: 0.3rem !important;
+        margin-bottom: 0.1rem !important;
     }
     section[data-testid="stSidebar"] h1,
     section[data-testid="stSidebar"] h2,
