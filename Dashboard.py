@@ -127,8 +127,12 @@ st.markdown(
         padding-top: 0 !important;
         padding-bottom: 0 !important;
     }
+    /* Les 2 séparateurs "---" (avant les axes X/Y et avant la recherche joueur) gardent plus
+       d'air que les autres champs pour bien marquer les 3 sections de la sidebar, malgré
+       l'espacement général resserré ci-dessus (retour utilisateur : ces lignes doivent se
+       distinguer, pas juste ajouter un trait fin collé aux champs). */
     section[data-testid="stSidebar"] hr {
-        margin: 0.4rem 0 !important;
+        margin: 1rem 0 !important;
     }
     </style>
     """,

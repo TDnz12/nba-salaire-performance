@@ -98,7 +98,7 @@ st.markdown(
         padding-bottom: 0 !important;
     }
     section[data-testid="stSidebar"] hr {
-        margin: 0.4rem 0 !important;
+        margin: 1rem 0 !important;
     }
 
     /* Cadre de taille FIXE identique pour chaque logo/photo (largeur ET hauteur, pas de % ni de
