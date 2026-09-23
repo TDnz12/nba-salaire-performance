@@ -40,6 +40,7 @@ from __future__ import annotations
 import functools
 import glob
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Literal
@@ -305,6 +306,40 @@ NBA_API_TEAM_STATS_SCHEMA_VERSION = 1
 
 # Cache brut pour _fetch_player_positions (voir plus bas).
 NBA_API_POSITIONS_SCHEMA_VERSION = 1
+
+# Cache brut pour _fetch_player_game_log (voir plus bas).
+NBA_API_GAME_LOG_SCHEMA_VERSION = 1
+
+# Cache pour get_mercato_lineup (carte "Mercato" par équipe).
+MERCATO_SCHEMA_VERSION = 4  # v4: troisième critère d'éligibilité -- un joueur établi (>= 25% de
+# la saison TOUTES ÉQUIPES CONFONDUES) reste éligible dès MERCATO_MIN_GAMES_ESTABLISHED_PLAYER
+# matchs avec son équipe de fin de saison, même s'il rate les deux critères existants (ex: Kevin
+# Durant, Phoenix 2022-23, seulement 8 matchs à Phoenix après sa blessure post-transfert -- sous
+# les deux seuils précédents malgré un statut de titulaire incontestable sur la saison)
+# v3: éligibilité assouplie -- un joueur est aussi éligible s'il a
+# joué >= 50% des matchs de son équipe depuis son arrivée (même si < 25% de la saison complète),
+# pour ne pas exclure un titulaire tradé à la deadline (ex: Kyrie Irving à Dallas, 2022-23, ~20
+# matchs sur les ~24 restants après son arrivée -- sous les 25% de la saison mais titulaire) --
+# avec un plancher MERCATO_MIN_GAMES_SINCE_ARRIVAL pour ne pas rendre éligible un contrat de 10
+# jours qui joue 3 des 4 derniers matchs de l'équipe
+# v2: minutes/matchs recalculés PAR ÉQUIPE (_fetch_player_game_log) -- v1 utilisait les moyennes
+# saison de get_player_stats, mélangeant les équipes d'un joueur transféré en cours de saison
+# (ex: Hayward CHA+OKC 2023-24 ressortait à 24.4 min/match blend, alors qu'il ne tournait qu'à
+# ~17 min/match une fois à OKC)
+
+# Nombre minimum de matchs joués AVEC L'ÉQUIPE pour le second critère d'éligibilité (50% des
+# matchs de l'équipe depuis l'arrivée du joueur, voir get_mercato_lineup) -- sans ce plancher, un
+# contrat de 10 jours qui joue 3 des 4 derniers matchs de l'équipe (75% >= 50%) deviendrait
+# éligible et pourrait entrer dans le top 5. Ne s'applique qu'à ce second critère : le premier
+# (25% de la saison complète) n'a pas besoin d'un plancher séparé, il en impose déjà un de fait.
+MERCATO_MIN_GAMES_SINCE_ARRIVAL = 10
+
+# Nombre minimum de matchs joués AVEC L'ÉQUIPE DE FIN DE SAISON pour le troisième critère
+# d'éligibilité (joueur "établi" sur la saison entière, toutes équipes confondues -- voir
+# get_mercato_lineup) -- évite qu'un match unique joué juste avant la fin de saison (ex: retour
+# de blessure sur le dernier match) suffise à rendre éligible un joueur par ailleurs éligible
+# côté volume de saison.
+MERCATO_MIN_GAMES_ESTABLISHED_PLAYER = 5
 
 # Cache brut pour _load_legacy_kaggle_raw.
 LEGACY_KAGGLE_SCHEMA_VERSION = 1
@@ -1154,6 +1189,221 @@ def get_team_ranking(season: str, period: PlayoffMode = "regular", force_refresh
 
     result = team_stats.merge(salary_by_team, on="team", how="left")
     result["champion"] = result["team"] == CHAMPIONS_BY_SEASON.get(season)
+    return result
+
+
+MERCATO_LABELS = ["M", "A", "AI", "AF", "P"]
+MERCATO_POSITION_ORDER = {"Extérieur": 0, "Ailier": 1, "Intérieur": 2}
+
+
+def _fetch_player_game_log(season: str, force_refresh: bool = False) -> pd.DataFrame:
+    """Log match par match de chaque joueur sur `season` (nba_api, LeagueGameLog en mode
+    joueurs, saison régulière UNIQUEMENT) : une ligne par (joueur, match), avec l'équipe et les
+    minutes de CE match précis. Contrairement à get_player_stats (une moyenne déjà agrégée sur
+    toute la saison -- toutes équipes confondues pour un joueur transféré), ce log permet de
+    recalculer une moyenne PAR ÉQUIPE, utilisée par get_mercato_lineup pour ne pas mélanger les
+    minutes d'un joueur avant/après un transfert.
+
+    Un seul appel groupé par saison (comme _fetch_team_games_possible) : LeagueGameLog renvoie
+    directement une ligne par (joueur, match) pour toute la ligue en une requête, pas besoin
+    d'un appel par joueur ou par équipe."""
+    raw_cache_path = NBA_RAW_DIR / "nba_api" / f"game_log_{season}.parquet"
+    cached = None if force_refresh else read_cache(raw_cache_path, schema_version=NBA_API_GAME_LOG_SCHEMA_VERSION)
+    if cached is not None:
+        return cached
+
+    from nba_api.stats.endpoints import leaguegamelog
+
+    raw = _call_with_retries(
+        lambda: leaguegamelog.LeagueGameLog(
+            season=season, season_type_all_star="Regular Season", player_or_team_abbreviation="P",
+        ).get_data_frames()[0],
+        description=f"_fetch_player_game_log({season})",
+    )
+    result = raw.rename(columns={
+        "PLAYER_ID": "player_id", "TEAM_ABBREVIATION": "team", "MIN": "minutes", "GAME_DATE": "game_date",
+    })[["player_id", "team", "game_date", "minutes"]]
+
+    write_cache(result, raw_cache_path, schema_version=NBA_API_GAME_LOG_SCHEMA_VERSION)
+    return result
+
+
+def get_mercato_lineup(season: str, force_refresh: bool = False) -> pd.DataFrame:
+    """Pour chaque équipe de `season` (saison régulière UNIQUEMENT, jamais playoffs), les 6
+    joueurs affichés sur sa carte "Mercato" : un top 5 par minutes/match parmi les joueurs
+    éligibles, réordonné par groupe de poste (Extérieur puis Ailier puis Intérieur, minutes
+    décroissantes dans chaque groupe) avec l'étiquette M/A/AI/AF/P collée aux positions 1-5
+    dans cet ordre FIXE -- pas un vrai mapping poste réel -> étiquette, voir plus bas -- puis
+    un 6e homme (position 6, étiquette "6e").
+
+    Rattachement d'équipe et minutes/matchs recalculés depuis le game log match par match
+    (_fetch_player_game_log), PAS depuis get_player_stats (dont les moyennes sont blendées sur
+    toute la saison pour un joueur transféré, ex: Hayward CHA+OKC 2023-24 ressortait à
+    24.4 min/match toutes équipes confondues, alors qu'il ne tournait qu'à ~17 min/match une
+    fois à OKC) : chaque joueur est rattaché à l'équipe de son DERNIER match de la saison,
+    recalculée depuis game_date -- PAS depuis get_player_stats.team, qui diffère de l'équipe du
+    dernier match réel sur une poignée de joueurs en fin de banc/contrats courts (vérifié
+    empiriquement : 8/572 joueurs en 2023-24). Ses minutes/matchs ne comptent que les matchs
+    joués avec CETTE équipe -- il n'apparaît dans aucune autre carte. Un joueur sans aucun match
+    loggé cette saison (blessé toute l'année, jamais appelé en two-way...) n'apparaît dans
+    aucune carte : cohérent, impossible de lui attribuer une équipe ou des minutes sans match
+    réel.
+
+    Éligibilité (`games_played` avec cette équipe >= 25% des matchs possibles de la saison,
+    arrondi au supérieur via _fetch_team_games_possible) : évite qu'un joueur à très peu de
+    matchs mais beaucoup de minutes/match (petit échantillon gonflé) passe devant un vrai
+    titulaire. Si une équipe a moins de 6 joueurs éligibles, les places restantes sont comblées
+    par ses joueurs NON éligibles, par minutes/match décroissantes -- l'éligibilité prime
+    TOUJOURS sur les minutes brutes (un joueur éligible passe avant n'importe quel non-éligible,
+    même si ce dernier a plus de minutes/match).
+
+    Second critère d'éligibilité, en OU avec le premier : au moins 50% des matchs joués par SON
+    ÉQUIPE depuis le premier match du joueur avec elle (arrondi au supérieur), ET au moins
+    MERCATO_MIN_GAMES_SINCE_ARRIVAL matchs joués avec cette équipe -- sans ce plancher, un
+    contrat de 10 jours qui joue 3 des 4 derniers matchs de l'équipe (75% >= 50%) deviendrait
+    éligible. Un joueur tradé à la deadline (ex: Kyrie Irving, Dallas 2022-23, ~20 matchs sur
+    les ~24 restants après son arrivée) peut être sous le seuil des 25% de la saison complète
+    tout en étant titulaire depuis son arrivée -- ce second critère l'évite. Le "match
+    d'arrivée" et le calendrier de l'équipe viennent tous deux du game log (dates de match
+    distinctes où l'équipe apparaît, sur TOUS les joueurs -- indépendant du joueur regardé).
+
+    Troisième critère d'éligibilité, en OU avec les deux précédents : le joueur a joué au moins
+    25% des matchs possibles de la saison TOUTES ÉQUIPES CONFONDUES (total de ses matchs dans le
+    game log, peu importe l'équipe) ET au moins MERCATO_MIN_GAMES_ESTABLISHED_PLAYER matchs avec
+    son équipe de fin de saison -- couvre un joueur clairement établi sur la saison mais dont le
+    passage dans sa dernière équipe est trop court pour les deux critères précédents (ex: Kevin
+    Durant, Phoenix 2022-23 : 8 matchs à Phoenix après une blessure post-transfert, mais 47
+    matchs toutes équipes confondues sur la saison). Ne change RIEN au classement dans le top 6
+    (toujours basé uniquement sur les minutes/match avec l'équipe de fin de saison) -- ce
+    critère ne fait qu'élargir qui est éligible, pas comment les éligibles sont ordonnés (Hayward,
+    OKC 2023-24, reste hors du top 6 : ses minutes à OKC restent basses même une fois éligible).
+
+    Étiquettes M/A/AI/AF/P (Meneur/Arrière/Ailier/Ailier Fort/Pivot) : collées aux 5 PREMIÈRES
+    places du tri par poste ci-dessus dans cet ordre fixe, quel que soit le mix réel de postes
+    de l'équipe (ex: une équipe avec 3 Extérieurs dans son top 5 aura 3 joueurs étiquetés
+    M/A/AI qui ne jouent pas tous réellement meneur/arrière/ailier) -- compromis explicitement
+    accepté plutôt qu'un système de quota qui exclurait un joueur pour forcer un mix 2/2/1.
+
+    `position_group` manquant (NaN) : traité comme "Ailier" UNIQUEMENT pour ce tri
+    (position_missing=True le signale) -- la colonne position_group du résultat garde sa
+    vraie valeur (NaN), ce repli ne change pas la donnée affichée.
+
+    Mis en cache par saison (data_cache/processed/nba/mercato_<season>.parquet, même mécanisme
+    read_cache/write_cache que le reste du module)."""
+    processed_path = NBA_PROCESSED_DIR / f"mercato_{season}.parquet"
+    cached = None if force_refresh else read_cache(processed_path, schema_version=MERCATO_SCHEMA_VERSION)
+    if cached is not None:
+        return cached
+
+    game_log = _fetch_player_game_log(season, force_refresh=force_refresh)
+    games_possible = _fetch_team_games_possible(season, force_refresh=force_refresh)
+    min_games = math.ceil(0.25 * games_possible)
+
+    # Équipe du DERNIER match de la saison = équipe "de fin de saison" pour ce joueur -- recalculée
+    # ici depuis game_date plutôt que réutilisée depuis get_player_stats.team (voir docstring pour
+    # le pourquoi : 8/572 joueurs en 2023-24 divergent entre les deux).
+    last_game = (
+        game_log.sort_values("game_date")
+        .drop_duplicates(subset="player_id", keep="last")[["player_id", "team"]]
+        .rename(columns={"team": "final_team"})
+    )
+    # Minutes/matchs recalculés en ne gardant QUE les lignes du game log où l'équipe jouée
+    # correspond à l'équipe de fin de saison de ce joueur -- exclut mécaniquement les matchs
+    # joués avec une équipe précédente en cas de transfert.
+    per_team_stats = (
+        game_log.merge(last_game, on="player_id")
+        .query("team == final_team")
+        .groupby("player_id", as_index=False)
+        .agg(
+            games_played=("minutes", "count"),
+            minutes_per_game=("minutes", "mean"),
+            first_game_date=("game_date", "min"),
+        )
+    )
+    lineup_base = last_game.rename(columns={"final_team": "team"}).merge(
+        per_team_stats, on="player_id", how="left"
+    )
+
+    # Nom + poste viennent de get_player_stats (jointure sur player_id UNIQUEMENT, pas sur team --
+    # son "team" à lui n'est pas utilisé ici, voir docstring).
+    players_meta = get_player_stats(season, force_refresh=force_refresh, period="regular")[
+        ["player_id", "player", "position_group"]
+    ].drop_duplicates(subset="player_id")
+    lineup_base = lineup_base.merge(players_meta, on="player_id", how="left")
+
+    # Calendrier de chaque équipe (dates de match distinctes, toutes lignes confondues -- un match
+    # de l'équipe est loggé par au moins un joueur ayant cette valeur "team" ce jour-là) : sert au
+    # second critère d'éligibilité ci-dessous ("50% des matchs de l'équipe depuis l'arrivée").
+    team_schedule = game_log.groupby("team")["game_date"].apply(lambda s: np.sort(s.unique())).to_dict()
+
+    def _team_games_since(team: str, since_date) -> int:
+        dates = team_schedule.get(team, np.array([]))
+        return int((dates >= since_date).sum())
+
+    lineup_base["_team_games_since_arrival"] = [
+        _team_games_since(t, d) for t, d in zip(lineup_base["team"], lineup_base["first_game_date"])
+    ]
+    lineup_base["_eligible_full_season"] = lineup_base["games_played"].fillna(0) >= min_games
+    lineup_base["_eligible_since_arrival"] = (
+        lineup_base["games_played"].fillna(0) >= MERCATO_MIN_GAMES_SINCE_ARRIVAL
+    ) & (
+        lineup_base["games_played"].fillna(0)
+        >= lineup_base["_team_games_since_arrival"].apply(lambda n: math.ceil(0.5 * n))
+    )
+    # Troisième critère : joueur "établi" sur la saison ENTIÈRE toutes équipes confondues (total
+    # de matchs dans le game log, sans filtrer sur l'équipe de fin de saison), avec un plancher
+    # de matchs joués avec l'équipe de fin de saison -- voir docstring.
+    total_games_by_player = game_log.groupby("player_id").size().rename("total_games_all_teams")
+    lineup_base = lineup_base.merge(total_games_by_player, on="player_id", how="left")
+    lineup_base["_eligible_established"] = (
+        (lineup_base["total_games_all_teams"].fillna(0) >= min_games)
+        & (lineup_base["games_played"].fillna(0) >= MERCATO_MIN_GAMES_ESTABLISHED_PLAYER)
+    )
+    lineup_base["_eligible"] = (
+        lineup_base["_eligible_full_season"]
+        | lineup_base["_eligible_since_arrival"]
+        | lineup_base["_eligible_established"]
+    )
+    lineup_base["_position_missing"] = lineup_base["position_group"].isna()
+    lineup_base["_position_order"] = lineup_base["position_group"].fillna("Ailier").map(MERCATO_POSITION_ORDER)
+
+    rows = []
+    for team, team_df in lineup_base.groupby("team"):
+        eligible = team_df[team_df["_eligible"]].sort_values("minutes_per_game", ascending=False)
+        rest = team_df[~team_df["_eligible"]].sort_values("minutes_per_game", ascending=False)
+        six = pd.concat([eligible, rest], ignore_index=True).head(6)
+        if six.empty:
+            continue
+
+        n_starters = min(5, len(six))
+        starters = six.iloc[:n_starters].sort_values(
+            ["_position_order", "minutes_per_game"], ascending=[True, False]
+        )
+        for slot, (label, (_, row)) in enumerate(zip(MERCATO_LABELS, starters.iterrows()), start=1):
+            rows.append({
+                "team": team, "slot": slot, "label": label,
+                "player_id": row["player_id"], "player": row["player"],
+                "position_group": row["position_group"],
+                "minutes_per_game": row["minutes_per_game"],
+                "position_missing": bool(row["_position_missing"]),
+            })
+
+        if len(six) >= 6:
+            sixth = six.iloc[5]
+            rows.append({
+                "team": team, "slot": 6, "label": "6e",
+                "player_id": sixth["player_id"], "player": sixth["player"],
+                "position_group": sixth["position_group"],
+                "minutes_per_game": sixth["minutes_per_game"],
+                "position_missing": bool(sixth["_position_missing"]),
+            })
+
+    result = pd.DataFrame(
+        rows,
+        columns=["team", "slot", "label", "player_id", "player", "position_group",
+                 "minutes_per_game", "position_missing"],
+    )
+    write_cache(result, processed_path, schema_version=MERCATO_SCHEMA_VERSION)
     return result
 
 
