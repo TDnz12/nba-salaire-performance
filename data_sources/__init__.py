@@ -70,10 +70,14 @@ class SportConfig:
     # et la construction des URLs de logo/photo du CDN NBA. Optionnel (None par défaut) -- même
     # principe que les champs ci-dessus, la page doit gérer l'absence sans planter.
     get_teams_static: Optional[Callable[[], list]] = None
-    # Page "Mercato" (à venir) : get_mercato_lineup(season) -> pd.DataFrame des 6 joueurs affichés
-    # sur la carte Mercato de chaque équipe (voir nba.get_mercato_lineup pour le détail complet du
-    # tri/étiquetage). Optionnel (None par défaut), même principe que les champs ci-dessus.
+    # Page "Mercato" (pages/3_Mercato.py) : get_mercato_lineup(season) -> pd.DataFrame des 6
+    # joueurs affichés sur la carte Mercato de chaque équipe (voir nba.get_mercato_lineup pour le
+    # détail complet du tri/étiquetage). get_team_identity(season) -> pd.DataFrame (team_id/nom
+    # exact de cette saison-là, voir nba.get_team_identity) utilisé pour décider si le logo actuel
+    # d'une franchise est affichable. Optionnels (None par défaut), même principe que les champs
+    # ci-dessus.
     get_mercato_lineup: Optional[Callable[..., pd.DataFrame]] = None
+    get_team_identity: Optional[Callable[..., pd.DataFrame]] = None
 
 
 # --- Sport actif ---------------------------------------------------------
@@ -95,6 +99,7 @@ NBA = SportConfig(
     team_ranking_metrics=nba.TEAM_RANKING_METRICS,
     get_teams_static=nba.get_teams_static,
     get_mercato_lineup=nba.get_mercato_lineup,
+    get_team_identity=nba.get_team_identity,
 )
 
 # --- Sports à venir (aucune implémentation, juste affichés "bientôt") ----

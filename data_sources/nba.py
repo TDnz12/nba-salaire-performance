@@ -308,7 +308,10 @@ NBA_API_TEAM_STATS_SCHEMA_VERSION = 1
 NBA_API_POSITIONS_SCHEMA_VERSION = 1
 
 # Cache brut pour _fetch_player_game_log (voir plus bas).
-NBA_API_GAME_LOG_SCHEMA_VERSION = 1
+NBA_API_GAME_LOG_SCHEMA_VERSION = 2  # v2: ajout team_id/team_name (déjà renvoyés par
+# LeagueGameLog, juste pas gardés avant) -- utilisés par get_team_identity, pas de second appel
+# réseau nécessaire pour le nom d'équipe exact d'une saison (ex: "Charlotte Bobcats" en 2004-05
+# vs "Charlotte Hornets" aujourd'hui, même team_id -- voir pages/3_Mercato.py)
 
 # Cache pour get_mercato_lineup (carte "Mercato" par équipe).
 MERCATO_SCHEMA_VERSION = 4  # v4: troisième critère d'éligibilité -- un joueur établi (>= 25% de
@@ -1206,7 +1209,8 @@ def _fetch_player_game_log(season: str, force_refresh: bool = False) -> pd.DataF
 
     Un seul appel groupé par saison (comme _fetch_team_games_possible) : LeagueGameLog renvoie
     directement une ligne par (joueur, match) pour toute la ligue en une requête, pas besoin
-    d'un appel par joueur ou par équipe."""
+    d'un appel par joueur ou par équipe. Garde aussi team_id/team_name (déjà dans la réponse) --
+    utilisés par get_team_identity, pas seulement team (abréviation)."""
     raw_cache_path = NBA_RAW_DIR / "nba_api" / f"game_log_{season}.parquet"
     cached = None if force_refresh else read_cache(raw_cache_path, schema_version=NBA_API_GAME_LOG_SCHEMA_VERSION)
     if cached is not None:
@@ -1221,8 +1225,9 @@ def _fetch_player_game_log(season: str, force_refresh: bool = False) -> pd.DataF
         description=f"_fetch_player_game_log({season})",
     )
     result = raw.rename(columns={
-        "PLAYER_ID": "player_id", "TEAM_ABBREVIATION": "team", "MIN": "minutes", "GAME_DATE": "game_date",
-    })[["player_id", "team", "game_date", "minutes"]]
+        "PLAYER_ID": "player_id", "TEAM_ID": "team_id", "TEAM_ABBREVIATION": "team",
+        "TEAM_NAME": "team_name", "MIN": "minutes", "GAME_DATE": "game_date",
+    })[["player_id", "team_id", "team", "team_name", "game_date", "minutes"]]
 
     write_cache(result, raw_cache_path, schema_version=NBA_API_GAME_LOG_SCHEMA_VERSION)
     return result
@@ -1405,6 +1410,21 @@ def get_mercato_lineup(season: str, force_refresh: bool = False) -> pd.DataFrame
     )
     write_cache(result, processed_path, schema_version=MERCATO_SCHEMA_VERSION)
     return result
+
+
+def get_team_identity(season: str, force_refresh: bool = False) -> pd.DataFrame:
+    """Identité de chaque équipe pour `season` : team_id NBA (stable à travers un déménagement/
+    renommage) + nom complet EXACT de CETTE saison (ex: "Charlotte Bobcats" en 2004-05 vs
+    "Charlotte Hornets" aujourd'hui, même team_id ET même abréviation "CHA" -- piège si on se
+    fie à l'abréviation seule). Dérivé du game log (_fetch_player_game_log, déjà en cache pour
+    get_mercato_lineup) : TEAM_ID/TEAM_NAME sont déjà renvoyés par LeagueGameLog, pas besoin
+    d'un second appel réseau (ex: FranchiseHistory) pour cette donnée.
+
+    Utilisé par pages/3_Mercato.py (et par pages/2_Rosters.py à terme) pour ne montrer le logo
+    ACTUEL d'une franchise que si son identité (team_id + nom) cette saison-là est bien celle
+    d'aujourd'hui -- voir team_logo_url() dans pages/3_Mercato.py."""
+    game_log = _fetch_player_game_log(season, force_refresh=force_refresh)
+    return game_log[["team", "team_id", "team_name"]].drop_duplicates(subset="team").reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------

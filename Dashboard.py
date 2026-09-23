@@ -78,6 +78,9 @@ st.markdown(
        de couper l'emoji du titre pour un gain marginal. */
     div[data-testid="stAppViewBlockContainer"], .block-container {
         padding-top: 1.25rem !important;
+        padding-left: 1.25rem !important;
+        padding-right: 1.25rem !important;
+        max-width: 100% !important;
     }
     div[data-testid="stAppViewBlockContainer"] h1:first-of-type {
         margin-top: 0 !important;

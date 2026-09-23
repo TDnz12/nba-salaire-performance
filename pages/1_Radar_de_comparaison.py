@@ -57,6 +57,9 @@ st.markdown(
     }
     div[data-testid="stAppViewBlockContainer"], .block-container {
         padding-top: 1.25rem !important;
+        padding-left: 1.25rem !important;
+        padding-right: 1.25rem !important;
+        max-width: 100% !important;
     }
     div[data-testid="stAppViewBlockContainer"] h1:first-of-type {
         margin-top: 0 !important;
@@ -222,16 +225,6 @@ display_mode = st.radio(
 )
 score_suffix = "_score" if display_mode == "Indice" else "_percentile"
 score_unit = "/100" if display_mode == "Indice" else "ᵉ centile"
-st.caption(
-    "Chaque axe est un z-score par poste (Intérieur / Ailier / Extérieur), même méthode que le "
-    "modèle de valeur ajoutée du dashboard principal." + (
-        " Affiché ici mis à l'échelle 0-100 pour la lecture (clip à ±3 écarts-types) — 50 = dans "
-        "la moyenne des joueurs à son poste sur cet axe."
-        if display_mode == "Indice" else
-        " Affiché ici en rang percentile direct (rang / effectif) dans la même population de "
-        "référence — 90 = ce joueur fait mieux que 90% des joueurs de référence à son poste."
-    )
-)
 
 PLAYER_COLORS = {"A": ("#1f77b4", "rgba(31,119,180,0.25)"), "B": ("#FF7F0E", "rgba(255,127,14,0.25)")}
 # Décalé haut/bas par joueur : à 10 axes, deux joueurs avec des scores proches sur un même axe
@@ -355,6 +348,18 @@ fig.update_layout(
     margin=dict(t=90, b=90, l=90, r=90),
 )
 st.plotly_chart(fig, width="stretch")
+
+st.caption(
+    "Chaque axe est un z-score par poste (Intérieur / Ailier / Extérieur) : la position du "
+    "joueur est mesurée par rapport aux autres joueurs de référence au même poste, pas à "
+    "l'ensemble de la ligue." + (
+        " Affiché ici mis à l'échelle 0-100 pour la lecture (clip à ±3 écarts-types) — 50 = dans "
+        "la moyenne des joueurs à son poste sur cet axe."
+        if display_mode == "Indice" else
+        " Affiché ici en rang percentile direct (rang / effectif) dans la même population de "
+        "référence — 90 = ce joueur fait mieux que 90% des joueurs de référence à son poste."
+    )
+)
 
 for caveat in (sport.radar_caveats or []):
     st.caption(caveat)
